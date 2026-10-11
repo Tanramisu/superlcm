@@ -19,6 +19,8 @@ import { scheduleSummary, drainSummaryQueue } from './summary-scheduler.js'
 import { enqueueSummaryRun, reserveSummaryRun, bindSummaryRun, progressSummaryRun, finishSummaryRun, activeSummaryRun, summaryConcurrency } from './summary-runs.js'
 import { summaryTick, catchUp, catchupDeadlineMs, pendingLeaves } from './summary-background.js'
 import { randomUUID } from 'node:crypto'
+import {claudeCompactionNodes} from './claude-checkpoints.js'
+import {hostDraft,retainHostDraft,hostSavedReceipt} from './claude-host-drafts.js'
 const [command,...rest]=process.argv.slice(2)
 const homeFlag=rest.indexOf('--home')
 if(homeFlag>=0){if(!rest[homeFlag+1])throw Error('--home requires a path');process.env.SUPERLCM_HOME=rest[homeFlag+1];rest.splice(homeFlag,2)}
@@ -191,6 +193,21 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
     }
     process.stdout.write('{}\n')
   }finally{store.close()}
+} else if (command?.startsWith('compact-rescue-')) {
+  let store
+  const session=rest[0]
+  let reply={use:false}
+  try {
+    const input=JSON.parse(await new Promise((resolve,reject)=>{let text='';process.stdin.setEncoding('utf8');process.stdin.on('data',part=>{text+=part;if(text.length>32e6)reject(Error('Oversized compaction input'))});process.stdin.on('end',()=>resolve(text));process.stdin.on('error',reject)}))
+    // The cancellation fence must be written before constructor/schema waits on SQLite.
+    if(command==='compact-rescue-stop'){const {revokeClaudeRescue}=await import('./claude-rescue-cancellation.js');revokeClaudeRescue(session,input)}
+    store=new ClaudeStore()
+    const {prepareClaudeRescue,checkClaudeRescue,saveClaudeRescue,stopClaudeRescue}=await import('./claude-rescue-store.js')
+    const action={'compact-rescue-prepare':prepareClaudeRescue,'compact-rescue-check':checkClaudeRescue,'compact-rescue-save':saveClaudeRescue,'compact-rescue-stop':stopClaudeRescue}[command]
+    if(action&&session)reply=action(store,session,input)
+  }catch{reply={use:false,error:true}}
+  finally{store?.close()}
+  process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (command==='compact-packet') {
   // Called by the plugin's compaction module (hooks/compact-mod.js) with the live transcript on stdin.
   // Always answers JSON; { use:false, reason } hands the compaction back to Claude Code.
@@ -209,7 +226,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
         const context=verifiedCompactionInput(store,session,input.messages||[])
-        return planCompaction({meta:store.metadata(session),events:context.events,nodes:store.db.prepare('SELECT id,level,first,last,summary FROM nodes WHERE session=?').all(session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:Math.min(input.window||current.window,current.window),keepTokens:current.keep})
+        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:Math.min(input.window||current.window,current.window),keepTokens:current.keep})
       }
       const note=(result,stage,catchupMs=null)=>store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,session),after:result.after??null,catchupMs})
       const notePlan=(result,stage,ms=null)=>{
@@ -232,6 +249,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         }
       }
       if(reply.use)store.noteTakeover(session,input.tokens||0,reply.after||0)
+      else if(!reply.ambiguous&&store.integrationEnabled('claude-code')&&store.metadata(session).harness==='claude-code'&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large','unplaced_boundary'].includes(compactionDiagnostic(reply).code))reply.rescue=true
     }
     if(src&&(!setting.enabled||store.isDeleted(session)))store.noteCompaction(session,compactionDiagnostic(reply,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}))
   } catch(error) { reply={use:false,reason:'compaction planner failed; originals retained',error:true};if(rest[0]&&store.source(rest[0]))store.noteCompaction(rest[0],compactionDiagnostic(reply,{records:store.stats(rest[0]).records})) }
@@ -301,7 +319,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           bindSummaryRun(store,queued.run.id,{owner:'host:'+claimId})
           progressSummaryRun(store,queued.run.id,'host:'+claimId,{first:work.first,last:work.last})
           const task=adaptiveSummaryTask(work,readSummaryProfile(profileKey('claude-host',model||'configured',null),store))
-          reply={work:{task:{level:work.level,first:work.first,last:work.last,maxChars:task.maxChars,requestChars:task.requestChars,language:task.language,requireHeading:true},maxTokens:visibleOutputRoom(work.content),batch_id:work.batch_id,claim_id:claimId,system:SUMMARY_SYSTEM,prompt:buildSummaryPrompt(work.content,task),model:model||process.env.SUPERLCM_CLAUDE_CLI_MODEL||''}}
+          reply={work:{task:{level:work.level,first:work.first,last:work.last,maxChars:task.maxChars,requestChars:task.requestChars,language:task.language,requireHeading:true},maxTokens:visibleOutputRoom(work.content),batch_id:work.batch_id,claim_id:claimId,revision,system:SUMMARY_SYSTEM,prompt:buildSummaryPrompt(work.content,task),model:model||process.env.SUPERLCM_CLAUDE_CLI_MODEL||'',ready:hostDraft(store,session,work,revision)}}
         }
       } else {
         const input=await readHook()
@@ -311,7 +329,11 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           const revision=summarySettingsRevision(store,session)
           return !!claim&&active?.claim_id===claim.claim_id&&active.batch_id===input.batch_id&&hostClaimMatches(claim,input,revision)&&claim.revision===revision&&(!claim.deadline_ms||Date.now()<claim.deadline_ms)&&(!input.deadline_ms||Date.now()<input.deadline_ms)
         }
+        let persistence=false
         try {
+          if(hostSavedReceipt(store,session,input,summarySettingsRevision(store,session))){
+            reply={saved:true,more:Boolean(summaryWork(store,session)),reused:true}
+          }else {
           if (input.isAnswered === false) throw new Error('Summary generation was incomplete')
           let summary=checkedSummary(input.summary,{finishReason:input.finishReason})
           const work=summaryWork(store,session,{leafOnly:!!claim?.leaf_only})
@@ -324,15 +346,18 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           if(Number.isFinite(input.overshoot))updateSummaryProfile(profileKey('claude-host',model||'configured',null),{overshoot:input.overshoot},store)
           if(summary.length<20)throw new Error('summary too short')
           if(work.level===0)for(let i=work.first;i<=work.last;i++)store.exact(session,i)
+          persistence=true
+          retainHostDraft(store,session,work,claim,input,summary)
           store.addNode({session,id:work.batch_id,level:work.level,first:work.first,last:work.last,children:work.children,summary,digest:work.digest,model:`claude-code-host:${String(input.model||'configured').slice(0,80)}`},{leaseOwner:'host',validate:current})
           store.completeSummaryBatch(session,work.batch_id,claim.revision)
           if(claim.run_id){progressSummaryRun(store,claim.run_id,'host:'+claim.claim_id,{created:1});finishSummaryRun(store,claim.run_id,{owner:'host:'+claim.claim_id,state:'done'})}else store.setStatus(session,'ok')
           reply={saved:true,more:Boolean(summaryWork(store,session))}
-        } catch(error){if(claim?.run_id&&hostClaimMatches(claim,input,summarySettingsRevision(store,session)))finishSummaryRun(store,claim.run_id,{owner:'host:'+claim.claim_id,state:'failed',error});throw error}
+          }
+        } catch(error){if(persistence&&current())error.retrySave=true;if(claim?.run_id&&hostClaimMatches(claim,input,summarySettingsRevision(store,session)))finishSummaryRun(store,claim.run_id,{owner:'host:'+claim.claim_id,state:'failed',error});throw error}
         finally { if(hostClaimMatches(claim,input,summarySettingsRevision(store,session)))store.releaseHostClaim(session,claim.claim_id) }
       }
     }
-  } catch(error) { reply=error.none?{none:error.message}:{error:error.message} }
+  } catch(error) { reply=error.none?{none:error.message}:{error:error.message,...(error.retrySave?{retrySave:true}:{})} }
   finally { store.close() }
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (command==='archive') {

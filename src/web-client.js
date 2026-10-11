@@ -288,7 +288,7 @@ function nodeHtml(n) {
   const open = state.open.has(n.id), kids = state.children.get(n.id)
   const summary = n.summary.replace(/^DSH native summary\. Exact selected source records:[^\n]*\n/, '')
   const inner = !open ? '' : n.children?.length
-    ? '<div class="children">' + (kids ? kids.map(nodeHtml).join('') : '<div class="tail-row">' + t('读取中…') + '</div>') + '</div>'
+    ? '<div class="children">' + (kids ? kids.map(nodeHtml).join('') + (n.directSources || []).map(r => '<div class="raw-link"><button type="button" class="btn small" data-raw="' + r.first + '-' + r.last + '">' + t('查看 {n} 条原文', { n: r.last - r.first + 1 }) + ' (#' + r.first + '–#' + r.last + ')</button></div>').join('') : '<div class="tail-row">' + t('读取中…') + '</div>') + '</div>'
     : '<div class="raw-link"><button type="button" class="btn small" data-raw="' + n.first + '-' + n.last + '">' + t('查看 {n} 条原文', { n: n.source_records?.length ?? n.last - n.first + 1 }) + '</button></div>'
   return '<div class="node" data-id="' + esc(n.id) + '" aria-expanded="' + open + '"><button type="button" class="node-h" data-toggle="' + esc(n.id) + '"><span class="caret"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L7 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></span>' +
     '<span class="lv l' + Math.min(n.level, 3) + '">' + t('第{n}层', { n: n.level + 1 }) + '</span><span class="node-text">' + esc(summary) + '</span><span class="range">#' + n.first + '–' + n.last + '</span></button>' + inner + '</div>'
@@ -297,6 +297,7 @@ async function ensureChildren(id) {
   if (state.children.has(id)) return
   const x = await api('/api/outline?session=' + q(state.sel) + '&node=' + q(id))
   if (x.nodes) state.children.set(id, x.nodes)
+  const node = findNode(id); if (node && x.directSources) node.directSources = x.directSources
 }
 function findNode(id, list = state.detail.nodes) {
   for (const n of list) { if (n.id === id) return n; const kids = state.children.get(n.id); const hit = kids && findNode(id, kids); if (hit) return hit }

@@ -1,4 +1,5 @@
 import {legacyDshSource} from './dsh-evidence.js'
+import {claudeCheckpoints} from './claude-checkpoints.js'
 import { profileKey, readSummaryProfile, updateSummaryProfile, visibleOutputRoom, adaptiveSummaryTask, fitSummary, isReducedSummary, reducedNotice } from './summary-generation.js'
 import { readOpenAICompletion, readSummaryJson, readSummaryText, summaryFailure, STREAM_COMPLETE } from './summary-response.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -150,7 +151,7 @@ export function summaryWork(store, session, options = {}) {
   const saved = store.tuning()
   const { batchSize = segmentMessages(), fanout = saved.fanout } = options
   const budget=budgetFor(saved,options)
-  const done = store.nodeRows(session, 0)
+  const done = [...store.nodeRows(session, 0),...claudeCheckpoints(store,session)].sort((a,b)=>a.last-b.last)
   const start = done.length ? Math.max(...done.map(n => n.last)) + 1 : 0
   const events = summaryEvents(store, session, start)
   const end = segmentEnd(events, 0, budget, batchSize)
@@ -196,7 +197,7 @@ export function summaryWork(store, session, options = {}) {
 // Dry-run estimate of a background pass: how many records it covers and how many model calls it makes.
 export function summaryEstimate(store, session, options={}) {
   const tuning=store.tuning(),{fanout}=tuning,budget=budgetFor(tuning,options)
-  const done = store.nodeRows(session, 0)
+  const done = [...store.nodeRows(session, 0),...claudeCheckpoints(store,session)].sort((a,b)=>a.last-b.last)
   const start = done.length ? Math.max(...done.map(n => n.last)) + 1 : 0
   const events = summaryEvents(store, session, start)
   let segments = 0, from = 0

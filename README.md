@@ -50,7 +50,8 @@ Claude Code's own compaction stops the conversation at the threshold, asks the m
 - **The work in hand keeps its detail.** The newest 40K tokens (adjustable: 20K, 40K, 80K or a custom size) stay word for word. Only older parts become summaries, with exact originals available for later lookup.
 - **Complete originals.** Only the agent's view gets shorter. Every original stays in the archive, numbered, and the agent quotes it back with `lcm_read` when a detail matters.
 - **Summaries by Haiku, inside the conversation.** With "Own tool, in the background" and model `haiku` on the Claude Code card, the plugin calls Haiku through the conversation's own login. No API key, no second Claude Code session, and the expensive main model is not spent on bookkeeping.
-- **Safe by default.** Off until you turn it on. If the summaries have not caught up or anything looks wrong, Claude Code compacts the usual way, and turning it off restores your previous setting. Subagents always compact the usual way.
+- **One final rescue for missing coverage.** With takeover enabled, if bounded catch-up still cannot provide enough safe coverage or space, the plugin asks the current conversation model once, reusing verified summaries and protecting the exact current request. Completed output survives transient save failures. Failed or ambiguous rescues return to native compaction; subagents remain native. See [behavior and limits](docs/CLAUDE-MAIN-RESCUE.md).
+- **Off by default.** Turning takeover off restores your previous compaction setting. Background archiving and summaries can still run separately.
 
 An earlier example from a conversation of about 12,000 records: the older part became 3 summaries of about 8,000 characters (a few thousand tokens), the newest stretch stayed verbatim, and a 300K context came back at roughly 70K, most of it Claude Code's own system prompt and tool definitions.
 

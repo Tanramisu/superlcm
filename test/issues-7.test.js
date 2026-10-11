@@ -229,7 +229,17 @@ test('the real hook module runs in a VM without process or builtin module import
     for(let i=0;i<8;i++)await new Promise(r=>setTimeout(r,0))
     assert.ok(calls.some(c=>c.command==='summary-tick'))
     assert.equal(runInContext('typeof process',context),'undefined')
-    process.stdout.write(JSON.stringify({replaced:true,ticked:true,imports:imports.length}))
+    let mainCalls=0
+    $.session.model=async()=> 'vm-current'
+    $.model={complete:async()=>{mainCalls++;return {isAnswered:true,text:'# Historical state\\nPreserve source constraints.',stopReason:'end_turn'}}}
+    $.process.run=async(args,options)=>{
+      const command=args[2]
+      const reply=command==='compact-packet'?{use:false,rescue:true}:command==='compact-rescue-prepare'?{work:{node_id:'vm-root',claim_id:'vm-claim',input_hash:'vm-input',model:'vm-current',deadline_ms:Date.now()+90000,prompt:'Historical source',system:'Summary only',task:{},maxTokens:2000}}:command==='compact-rescue-check'?{valid:true}:command==='compact-rescue-save'?{use:true,start:1,packet:'VM final checkpoint'}:{}
+      return {stdout:JSON.stringify(reply)}
+    }
+    const rescued=await hooks.get('session.compact')($,{messages},()=>assert.fail('Final rescue must run in the same minimal sandbox'))
+    assert.equal(mainCalls,1);assert.equal(rescued.messages[0].text,'VM final checkpoint')
+    process.stdout.write(JSON.stringify({replaced:true,ticked:true,rescued:true,imports:imports.length}))
   `
   const result=spawnSync(process.execPath,['--experimental-vm-modules','--input-type=module','-'],{input:script,encoding:'utf8',timeout:5000})
   assert.equal(result.status,0,result.stderr)

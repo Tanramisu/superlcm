@@ -1,6 +1,7 @@
 // Text alone cannot distinguish a native summary from a person quoting one.
 // Verify Claude's isCompactSummary flag in the exact archived record instead.
 import { coveredThrough } from './compaction.js'
+import {claudeCheckpoints} from './claude-checkpoints.js'
 const prefix = 'This session is being continued from a previous conversation'
 const textOf = record => {
   const content = record?.message?.content??record?.content
@@ -8,7 +9,7 @@ const textOf = record => {
 }
 export function verifiedCompactionInput(store, session, messages) {
   const nativeTexts = [], promptTexts = [], packets=[]
-  const through = coveredThrough(store.nodeRows(session, 0)), all=store.eventRows(session)
+  const through = coveredThrough([...store.nodeRows(session, 0),...claudeCheckpoints(store,session)]), all=store.eventRows(session)
   const opening=messages[0]?.text?.trim()||'',packetCandidate=opening.startsWith('<superlcm-context ')
   const events=all.map(event=>{
     if(!event.preview.startsWith('user: ') && !(packetCandidate&&!event.preview))return event
@@ -27,7 +28,7 @@ export function verifiedCompactionInput(store, session, messages) {
     // The module sends at most 2000 characters. Only the opening synthetic
     // summary may be replaced; later real prompts retain their turn protection.
     const text = message.text.trim()
-    const matches = original => original.slice(0, 2000).trim() === text
+    const matches = original => original.trim() === text || original.slice(0, 2000).trim() === text
     const nativeSummary = index === 0 && message.role === 'user' && text.startsWith(prefix) && nativeTexts.some(matches) && !promptTexts.some(matches)
     const packet= index===0 && message.role==='user' && packetCandidate && packets.some(p=>matches(p.text)) && !events.some(e=>e.humanPrompt&&matches(e.text||''))
     return { ...message, nativeSummary, packetSummary:packet }

@@ -1,5 +1,6 @@
 import { fitSummary, repairSummaryPrompt } from '../src/summary-fitting.js'
 import { checkedSummary } from '../src/summary-policy.js'
+import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
 // A Claude Code module (2.1.286+), two jobs:
 // 接管压缩: when the main conversation compacts, SuperLcm answers with its own summaries plus the newest
 // messages word for word (see src/compaction.js). Anything unexpected, the setting being off, a subagent, or
@@ -14,6 +15,7 @@ const cli = ($, command, id, stdin, { flags = [], timeoutMs = 60000 } = {}) => $
   .then(r => JSON.parse(r.stdout.trim().split('\n').at(-1) || '{}'))
 const MAX_PIECES = 2000 // a whole backlog in one background run (one at a time per session); turns never wait for it
 const writing = new Map(), ticked = new Map(), ticking = new Set(), ended = new Set()
+const outputs = new Map()
 function live(state) {
   state.controller.signal.throwIfAborted()
   if(state.deadline&&Date.now()>=state.deadline){state.controller.abort(Error('Summary catch-up deadline reached'));state.controller.signal.throwIfAborted()}
@@ -44,7 +46,7 @@ function writeSummaries($, id, options = {}) {
   if(ended.has(id))return Promise.resolve()
   let state=writing.get(id)
   if(state){limitWriter(state,options);return state.run}
-  state={controller:new AbortController(),deadline:0,leafOnly:false,remaining:MAX_PIECES,requests:new Set(),cleanups:[],claim:null,timer:null}
+  state={controller:new AbortController(),deadline:0,leafOnly:false,remaining:MAX_PIECES,requests:new Set(),cleanups:[],claim:null,timer:null,saving:false}
   limitWriter(state,options)
   writing.set(id,state)
   state.run=writeLoop($,id,state).finally(()=>{
@@ -74,6 +76,10 @@ async function writeLoop($, id, state) {
       live(state)
       if(state.leafOnly&&task.level>0)return
       const use = model || await $.session.model()
+      const key=JSON.stringify([batch_id,claim.work.revision,use])
+      let cached=outputs.get(id)
+      if(cached?.key!==key){outputs.delete(id);cached=null}
+      if(!cached&&claim.work.ready?.model===use)cached={key,...claim.work.ready}
       let overshoot=1
       const generate = async prompt => {
         live(state)
@@ -95,14 +101,27 @@ async function writeLoop($, id, state) {
         if (!r.isAnswered) throw Error('Summary generation was incomplete')
         return checkedSummary(r.text,{...task,finishReason:r.stopReason ?? r.stop_reason ?? r.finishReason ?? r.finish_reason,maxChars:null})
       }
-      const summary=await fitSummary(await generate(prompt),draft=>generate(repairSummaryPrompt(draft,task)),{task,onOvershoot:ratio=>{overshoot=ratio}})
+      const summary=cached?.summary||await fitSummary(await generate(prompt),draft=>generate(repairSummaryPrompt(draft,task)),{task,onOvershoot:ratio=>{overshoot=ratio}})
+      if(cached)overshoot=cached.overshoot||1
       live(state)
-      const saved = await cli($, 'summary-save', id, JSON.stringify({ ...state.claim, summary, overshoot, model: use, isAnswered: true, deadline_ms:state.deadline }),{timeoutMs:timeout(state)})
-      if (!saved.saved) return
+      outputs.set(id,{key,summary,overshoot,model:use})
+      const valid=await cli($,'summary-check',id,JSON.stringify(state.claim),{timeoutMs:timeout(state)})
+      if(!valid.valid){outputs.delete(id);return}
+      live(state);state.saving=true
+      let saved
+      for(let attempt=0;attempt<2;attempt++){
+        try{saved=await cli($,'summary-save',id,JSON.stringify({...state.claim,summary,overshoot,model:use,isAnswered:true,deadline_ms:state.deadline}),{timeoutMs:timeout(state)});break}
+        catch(error){live(state);if(attempt===1)throw error}
+      }
+      if(!saved.saved){if(!saved.retrySave)outputs.delete(id);return}
+      outputs.delete(id);state.saving=false
       state.claim=null;state.remaining--
       if (!saved.more) return
     }
-  } catch { if(!state.controller.signal.aborted){state.handoff=true;try{await cli($,'summary-host-error',id,JSON.stringify(state.claim||{}))}catch{}} }
+  } catch {
+    if(state.controller.signal.aborted)outputs.delete(id)
+    else if(!state.saving){outputs.delete(id);state.handoff=true;try{await cli($,'summary-host-error',id,JSON.stringify(state.claim||{}))}catch{}}
+  }
 }
 function summaryTick($,id) {
   const now=Date.now()
@@ -135,6 +154,7 @@ export function register(on) {
     try{
       const id=await $.session.id(),state=writing.get(id)
       ended.add(id)
+      outputs.delete(id);discardClaudeRescue(id)
       ticked.delete(id)
       if(state){state.handoff=true;state.controller.abort(Error('Session ended'))}
       else await cli($,'summary-handoff',id)
@@ -146,9 +166,9 @@ export function register(on) {
     // kept and swapped in at the threshold without asking again) is answered too: when the summaries are
     // ready, ours is what gets kept; when they are not, Claude Code prepares its own as usual.
     if (e.agentId) return next(e)
-    let plan
+    let plan,id
     try {
-      const id=await $.session.id()
+      id=await $.session.id()
       plan = await packet($, id, e.messages, e.instructions, e.trigger)
       if(plan?.catchup?.host){
         const ms=Math.min(Math.max(0,Number(plan.catchup.deadlineMs)||0),240000),started=Date.now()
@@ -161,8 +181,9 @@ export function register(on) {
         finally{clearTimeout(timer);if(cancel)e.signal.removeEventListener('abort',cancel)}
         plan=await packet($,id,e.messages,e.instructions,e.trigger,{afterCatchup:true,catchupMs:Date.now()-started})
       }
+      if(!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude($,id,e)||plan
     } catch { plan = null;try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
-    if (plan?.use && plan.start > 0 && plan.start < e.messages.length)
+    if (!ended.has(id)&&!e.signal?.aborted&&plan?.use && plan.start > 0 && plan.start < e.messages.length)
       return { messages: [{ role: 'user', text: plan.packet, toolUses: [] }, ...e.messages.slice(plan.start)] }
     return next(e)
   })

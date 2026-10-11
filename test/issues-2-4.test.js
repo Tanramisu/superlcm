@@ -199,7 +199,7 @@ test('Claude in-host writer repairs complete overshoot and validates each call a
  }}}
  await hooks.get('turn.complete')($,{},async()=>({}))
  await completed
- assert.equal(calls,2);assert.equal(checks,4);assert.ok(saved.isAnswered);assert.ok(isReducedSummary(saved.summary));assert.ok(saved.summary.length<=6000)
+ assert.equal(calls,2);assert.equal(checks,5);assert.ok(saved.isAnswered);assert.ok(isReducedSummary(saved.summary));assert.ok(saved.summary.length<=6000)
 })
 
 test('Claude in-host writer never caps incomplete text or makes a call after claim invalidation',async()=>{

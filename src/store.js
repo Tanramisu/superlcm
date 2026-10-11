@@ -2,6 +2,7 @@ import { initializeEventCounts } from './event-counts.js'
 import { codexHeadlessRecord, codexHeadlessStatus } from './codex.js'
 import { initializeSummaryRuns, latestSummaryRun, summaryRunHistory, recoverSummaryRuns } from './summary-runs.js'
 import { claudeSidecarTitle } from './conversation-names.js'
+import {claudeDirectSources} from './claude-checkpoints.js'
 import { validModel } from './runtime.js'
 import { summaryMode } from './mode.js'
 import {legacyDshSource} from './dsh-evidence.js'
@@ -448,7 +449,7 @@ export class ClaudeStore {
   roots(session) {
     const nodes=this.db.prepare('SELECT n.id,n.level,n.first,n.last,n.children,n.summary FROM nodes n WHERE n.session=? AND '+dshVisibleNodes(this.db)+' ORDER BY n.first,n.level DESC').all(session)
     const owned=new Set(nodes.flatMap(n=>JSON.parse(n.children)))
-    return nodes.filter(n=>!owned.has(n.id)).map(n=>dshNodeSources(this.db,session,{...n,children:JSON.parse(n.children)}))
+    return nodes.filter(n=>!owned.has(n.id)).map(n=>dshNodeSources(this.db,session,{...n,children:JSON.parse(n.children),directSources:claudeDirectSources(this,session,n)}))
   }
   outline(session, nodeId) {
     const source=this.metadata(session), stats=this.stats(session)
@@ -457,11 +458,12 @@ export class ClaudeStore {
     const node=this.node(session,nodeId)
     if(!node) throw new Error('Unknown summary node')
     const children=JSON.parse(node.children)
-    const described=dshNodeSources(this.db,session,{...node,children})
-    if(children.length) return {source,node:described,nodes:children.map(id=>this.node(session,id)).filter(Boolean).map(n=>dshNodeSources(this.db,session,{...n,children:JSON.parse(n.children)}))}
+    const directSources=claudeDirectSources(this,session,node)
+    const described=dshNodeSources(this.db,session,{...node,children,directSources})
+    if(children.length) return {source,node:described,directSources,nodes:children.map(id=>this.node(session,id)).filter(Boolean).map(n=>dshNodeSources(this.db,session,{...n,children:JSON.parse(n.children),directSources:claudeDirectSources(this,session,n)}))}
     const selected=described.source_records?new Set(described.source_records):null
     const events=this.db.prepare("SELECT ordinal,substr(preview,1,400) AS preview FROM events WHERE session=? AND ordinal BETWEEN ? AND ? AND preview<>'' ORDER BY ordinal").all(session,node.first,node.last).filter(e=>!selected||selected.has(e.ordinal))
-    return {source,node:described,events}
+    return {source,node:described,directSources,events}
   }
   // Exact raw events by ordinal range, verified against the original file.
   readRange(session, from, to=from, charOffset=0, maxChars=12000) {

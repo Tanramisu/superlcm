@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.30 — 2026-10-11
+
+- Add one bounded current-conversation-model rescue for Claude takeover when prepared coverage or space remains insufficient. Reuse verified summaries, preserve the exact current request and recent tool-complete originals, and decline ambiguous sources.
+- Persist the final ready output before publishing its checkpoint. Reuse it after transient writes or lost receipts, including after reopening, without another model call.
+- Preserve ordinary Claude host-generated output across save-boundary faults and acknowledge exact already-saved receipts. Reject late cancelled output and obsolete settings/source snapshots.
+- Expose direct original-source navigation alongside old summary children. Fence queued saves with database-lock-independent cancellation markers, and register session cancellation before asynchronous usage discovery. Keep the hook runnable in the restricted plugin sandbox.
+- Add real CLI, temporary-store and offline-host regressions. DSH compression runtime is unchanged. See [behavior and validation limits](docs/CLAUDE-MAIN-RESCUE.md).
+
 ## 0.5.29 — 2026-10-11
 
 - Give each summary attempt an independent bounded deadline, including providers that ignore cancellation. Preserve safe SDK authentication/quota classes and route cooldowns.

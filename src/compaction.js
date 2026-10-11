@@ -25,7 +25,7 @@ const escapeAttr = s => String(s).replace(/[&"<>]/g, c => ({ '&': '&amp;', '"': 
 // Records 0..through are covered when level-0 summaries chain from record 0 without a gap.
 export function coveredThrough(nodes) {
   let through = -1
-  for (const n of nodes.filter(n => n.level === 0).sort((a, b) => a.first - b.first)) {
+  for (const n of nodes.filter(n => n.level === 0 || n.checkpoint === true).sort((a, b) => a.first - b.first)) {
     if (n.first > through + 1) break
     through = Math.max(through, n.last)
   }
@@ -106,6 +106,7 @@ function recentText(events, through) {
   }).join('\n')
 }
 export function renderPacket({ meta, summaries, through, keep, instructions, recent = null, request = null }) {
+  request ||= summaries.findLast(n=>n.rescueRequest)?.rescueRequest || null
   const code = meta.code
   const head = `<${PACKET_TAG} conversation="#${code}" keep="${keep}" through="${through}"${request?` request="${request.ordinal}"`: ''}>\n` +
     `This session is being continued from a previous conversation that ran out of context. The summaries below cover the earlier portion of the conversation (records 0-${through}), written by SuperLcm, the user's conversation-memory plugin, as the conversation went; the messages after this one continue it word for word. ` +
@@ -120,7 +121,7 @@ export function renderPacket({ meta, summaries, through, keep, instructions, rec
   }
   if (omitted) body += `(${omitted} more summaries did not fit; lcm_outline {"conversation":"#${code}"} lists them.)\n`
   if (recent) body += `<recent records="${recent.first}-${recent.last}">\nNot summarized yet: the dialogue of records ${recent.first}-${recent.last} word for word, tool calls and their output left out (lcm_read has them).\n${recent.text}\n</recent>\n`
-  if(request)body+=`<current-request record="${request.ordinal}">\n${request.text}\n</current-request>\n`
+  if(request)body+=`<current-request record="${request.ordinal}" historical="true">\nPreserved original user request; newer explicit instructions in the kept messages govern its scope.\n${request.text}\n</current-request>\n`
   const packet=head + body + `</${PACKET_TAG}>`
   return packet.length<=MAX_PACKET_CHARS?packet:null
 }
@@ -185,12 +186,12 @@ function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0
 
 // Keep a complete tool group at the start of the retained suffix, even when
 // several assistant chunks contribute to one call or tools return in parallel.
-function safeAssistantStarts(messages) {
+export function safeAssistantStarts(messages) {
  const safe=[],pending=new Set()
  for(let i=0;i<messages.length;i++){
   const m=messages[i]
   if(m.role==='assistant'&&!pending.size)safe.push(i)
-  for(const tool of m.toolUses||[]){const id=tool.tool_use_id||tool.id||tool.call_id;if(id)pending.add(id)}
+  for(const tool of m.toolUses||[]){const id=typeof tool==='string'?tool:tool.tool_use_id||tool.id||tool.call_id;if(id)pending.add(id)}
   if(Array.isArray(m.toolResultIds)){for(const id of m.toolResultIds)pending.delete(id)}
   else if(m.toolResults&&pending.size<=m.toolResults)pending.clear()
  }
@@ -201,7 +202,7 @@ function requestAt(events,ordinal) {
  if(!e||e.nativeSummary||!e.preview.startsWith('user: ')||e.toolResults||e.humanPrompt===false)return null
  return {ordinal:e.ordinal,text:e.text??e.preview.slice(6)}
 }
-function turnTail({messages,events,cut,tokens,total,size,keepTokens,window}) {
+export function turnTail({messages,events,cut,tokens,total,size,keepTokens,window}) {
  const p=messages.findLastIndex(m=>isPrompt(m)||isPacket(m)||m.nativeSummary)
  if(p<0)return null
  const anchor=messages[p],synthetic=isPacket(anchor)||anchor.nativeSummary

@@ -29,7 +29,7 @@ test('one long autonomous turn compresses near the keep budget with its exact fu
  assert.ok(plan.start>500&&plan.start<=701);assert.equal(fixture.messages[plan.start].role,'assistant')
  assert.ok(plan.after<=300000*.25, String(plan.after))
  assert.match(plan.packet,/request="0"/)
- assert.ok(plan.packet.includes('<current-request record="0">\n'+request+'\n</current-request>'))
+ assert.ok(plan.packet.includes('<current-request record="0" historical="true">\nPreserved original user request; newer explicit instructions in the kept messages govern its scope.\n'+request+'\n</current-request>'))
  assert.equal(plan.packet,planCompaction(input(fixture)).packet)
  assert.equal(fixture.messages[0].text,request.slice(0,2000))
 })
@@ -55,7 +55,7 @@ test('a second compaction carries the same original current request through the 
  const messages=[{role:'user',text:first.packet.slice(0,2000),size:first.packet.length,packetSummary:true},...fixture.messages.slice(first.start)]
  const plan=planCompaction({...input(fixture),messages,nodes:[node(770)],tokens:280000})
  assert.equal(plan.use,true);assert.equal(plan.inTurn,true)
- assert.ok(plan.packet.includes('<current-request record="0">\n'+request+'\n</current-request>'))
+ assert.ok(plan.packet.includes('<current-request record="0" historical="true">\nPreserved original user request; newer explicit instructions in the kept messages govern its scope.\n'+request+'\n</current-request>'))
  assert.ok(plan.start>0);assert.ok(plan.after<=105000)
 })
 test('verified native continuation preserves the last genuine human request',()=>{
@@ -88,7 +88,7 @@ test('a human quoting an old SuperLcm packet never authorizes a prior task throu
  assert.equal(verified.messages[0].packetSummary,false)
  const plan=planCompaction({...input(fixture),...verified})
  assert.equal(plan.use,true);assert.match(plan.packet,/request="5"/)
- assert.ok(plan.packet.includes('<current-request record="5">\n'+quote+'\n</current-request>'))
+ assert.ok(plan.packet.includes('<current-request record="5" historical="true">\nPreserved original user request; newer explicit instructions in the kept messages govern its scope.\n'+quote+'\n</current-request>'))
  assert.ok(!plan.packet.includes(request))
 })
 test('in-turn cut declines an oversized complete request and never truncates it',()=>{
