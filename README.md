@@ -12,6 +12,8 @@ From 0.5.11, background writers and Claude/DSH compaction share rules for chrono
 
 DSH pressure recovery is fixed in 0.5.28; see [behavior and validation](docs/DSH-PRESSURE-RECOVERY-0.5.28.md). Summary workers, retry progress and error diagnostics were revised in 0.5.27. See [changes and verification limits](docs/SUMMARY-JOBS-0.5.27.md).
 
+0.5.29 adds bounded summary attempts, durable commit recovery and one final current-model rescue when all summary routes exhaust quota. See [behavior and limits](docs/FAULT-RESILIENCE.md).
+
 ## Five harnesses, one archive
 
 | Harness | Archive, summaries and continuation | Compaction integration | How to connect |

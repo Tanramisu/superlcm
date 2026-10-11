@@ -526,7 +526,7 @@ test('a summary that saves no space remains unpublished and does not buy another
     })
 })
 
-test('timeout requests cancellation, retains the exclusive slot until the provider settles, and avoids immediate retry', async () => {
+test('timeout releases an ignored-abort provider slot, rejects late output and avoids immediate retry', async () => {
   let release
   const gate = new Promise(resolve => { release = resolve })
   await withHost({ tailCount: 1, minRetainTokens: 0, foldBatchTokens: 1000, summaryTimeoutMs: 20 }, async () => { await gate; return 'late response' },
@@ -536,7 +536,7 @@ test('timeout requests cancellation, retains the exclusive slot until the provid
       assert.equal(engine.startBackgroundFold(agent, selection), true)
       await new Promise(resolve => setTimeout(resolve, 40))
       assert.equal(calls[0].signal.aborted, true)
-      assert.equal(engine.backgroundFolds.has(other), true)
+      assert.equal(engine.backgroundFolds.has(other), false)
       assert.equal(engine.startBackgroundFold(other, selection), false)
       release(); await engine.settleBackgroundFold(agent)
       assert.equal(engine.backgroundFolds.has(agent), false)

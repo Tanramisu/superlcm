@@ -11,6 +11,8 @@ SuperLcm 让 **Claude Code、Codex、Hermes、Pi 和 dsh harness** 共用一座�
 
 0.5.28 修复 DSH 已完成摘要无法提交导致的反复等待，详见[行为与验证范围](docs/DSH-PRESSURE-RECOVERY-0.5.28.md)。
 
+0.5.29 修复摘要超时与提交失败后的恢复，并增加摘要路线耗尽后的对话模型最后兜底，详见[行为与验证范围](docs/FAULT-RESILIENCE.md)。
+
 0.5.27 整理了后台摘要排队、重试状态和错误提示，并修复合格摘要被长度检查误拒的问题。详见[修复与验证范围](docs/SUMMARY-JOBS-0.5.27.md)。
 
 ## 五种载体，一座档案馆

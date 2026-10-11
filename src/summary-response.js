@@ -1,4 +1,5 @@
 import {upstreamSummaryCause} from './summary-errors.js'
+import {abortable} from './summary-attempt.js'
 const MAX_RESPONSE_BYTES = 1024 * 1024
 // A parsed JSON response cannot forge this local completion proof.
 export const STREAM_COMPLETE = Symbol('verified summary stream completion')
@@ -18,7 +19,7 @@ const contentText = content => typeof content === 'string' ? content : Array.isA
 export async function readSummaryText(response,signal) {
   signal?.throwIfAborted()
   if (!response.body?.getReader) {
-    const text = await response.text()
+    const text = await abortable(response.text(),signal)
     if (Buffer.byteLength(text) > MAX_RESPONSE_BYTES) throw Error('Summary response exceeds the size limit')
     signal?.throwIfAborted();return text
   }
@@ -28,20 +29,20 @@ export async function readSummaryText(response,signal) {
   let size = 0
   try {
     for (;;) {
-      const { value, done } = await reader.read()
+      const { value, done } = await abortable(reader.read(),signal)
       signal?.throwIfAborted()
       if (done) break
       size += value.byteLength
-      if (size > MAX_RESPONSE_BYTES) { await reader.cancel(); throw Error('Summary response exceeds the size limit') }
+      if (size > MAX_RESPONSE_BYTES) { cancel(); throw Error('Summary response exceeds the size limit') }
       parts.push(Buffer.from(value))
     }
     return Buffer.concat(parts).toString('utf8')
-  } finally { signal?.removeEventListener('abort',cancel);reader.releaseLock() }
+  } finally { signal?.removeEventListener('abort',cancel);try{reader.releaseLock()}catch{} }
 }
 export async function readSummaryJson(response,signal) {
   // Keep compatibility with injected test transports exposing only json().
   if(!response.body?.getReader&&typeof response.text!=='function'){
-    signal?.throwIfAborted();const result=await response.json();signal?.throwIfAborted()
+    signal?.throwIfAborted();const result=await abortable(response.json(),signal);signal?.throwIfAborted()
     if(Buffer.byteLength(JSON.stringify(result))>MAX_RESPONSE_BYTES)throw Error('Summary response exceeds the size limit')
     return result
   }

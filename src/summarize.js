@@ -11,6 +11,7 @@ import { MAX_SUMMARY_INPUT } from './runtime.js'
 import { SUMMARY_POLICY_VERSION, SUMMARY_SYSTEM, summaryInstructions, checkedSummary, summaryPromptParts, joinSummaryPrompt, withSummaryRetry } from './summary-policy.js'
 import { repairSummaryPromptParts } from './summary-fitting.js'
 import {upstreamSummaryCause,classifySummaryError} from './summary-errors.js'
+import {abortable} from './summary-attempt.js'
 import { estimateSummaryTokens,takeTokenPrefix,takeTokenSuffix } from './summary-tokens.js'
 const hash = value => createHash('sha256').update(value).digest('hex')
 const head = (text, chars) => String(text || '').replace(/\s+/g,' ').slice(0,chars)
@@ -25,7 +26,7 @@ export async function summarizeWithModel(text, { model, apiKey, baseURL, apiURL,
   let qualityRetried=false
   let reasoningRoom=Math.max(THINKING[effort]||0,profile.reasoning_room), retried=false, completionParam='max_tokens'
   const headers=openai?{'content-type':'application/json',...(apiKey?{authorization:`Bearer ${apiKey}`}:{})}:{'content-type':'application/json',...(apiKey?{'x-api-key':apiKey}:{}),'anthropic-version':'2023-06-01'}
-  const detail=async(r,signal)=>{try{return (await readSummaryText(r,signal)).replace(/\s+/g,' ').slice(0,300)}catch{throw summaryFailure(outerSignal?.aborted?'Summary request cancelled':signal.aborted?'Summary request timed out':'Summary error response could not be read within the size limit',model,null,{},outerSignal?.aborted?'cancelled':signal.aborted?'timeout':'response_invalid')}}
+  const detail=async(r,signal,limit=300)=>{try{return (await readSummaryText(r,signal)).replace(/\s+/g,' ').slice(0,limit)}catch{throw summaryFailure(outerSignal?.aborted?'Summary request cancelled':signal.aborted?'Summary request timed out':'Summary error response could not be read within the size limit',model,null,{},outerSignal?.aborted?'cancelled':signal.aborted?'timeout':'response_invalid')}}
   const generate=async initialParts=>{
     let parts=initialParts
     for (;;) {
@@ -43,7 +44,7 @@ export async function summarizeWithModel(text, { model, apiKey, baseURL, apiURL,
         const signal=requestSignal()
         signal.throwIfAborted()
         if(shouldContinue&&!shouldContinue())throw Error('Summary setting changed; additional generation cancelled')
-        try{return {response:await fetchImpl(endpoint,{method:'POST',headers,body:JSON.stringify(body),signal}),signal}}
+        try{return {response:await abortable(fetchImpl(endpoint,{method:'POST',headers,body:JSON.stringify(body),signal}),signal,response=>response.body?.cancel?.()),signal}}
         catch{throw summaryFailure(outerSignal?.aborted?'Summary request cancelled':signal.aborted?'Summary request timed out':'Summary request transport failed',model,null,{},outerSignal?.aborted?'cancelled':signal.aborted?'timeout':'transport')}
       }
       let {response,signal}=await post()
@@ -52,7 +53,15 @@ export async function summarizeWithModel(text, { model, apiKey, baseURL, apiURL,
         if(completionParam!=='max_tokens'||!/max_completion_tokens|max_tokens/.test(why))throw summaryFailure('Summarization HTTP 400: request rejected; check model and endpoint configuration',model,null,{},'response_invalid')
         completionParam='max_completion_tokens';body.max_completion_tokens=body.max_tokens;delete body.max_tokens;({response,signal}=await post())
       }
-      if(!response.ok){void response.body?.cancel?.().catch(()=>{});throw summaryFailure(`Summarization HTTP ${Number.isSafeInteger(response.status)?response.status:0}: request failed; check endpoint, credential and model configuration`,model,null,{},[401,403].includes(response.status)?'auth':response.status===429?'rate_limit':response.status===402?'quota':'upstream')}
+      if(!response.ok){
+        let kind=[401,403].includes(response.status)?'auth':response.status===429?'rate_limit':response.status===402?'quota':'upstream'
+        if(response.status===429){
+          const body=await detail(response,signal,1024*1024)
+          let value;try{value=JSON.parse(body)}catch{value=body}
+          if(upstreamSummaryCause(value).kind==='quota')kind='quota'
+        }else void response.body?.cancel?.().catch(()=>{})
+        throw summaryFailure(`Summarization HTTP ${Number.isSafeInteger(response.status)?response.status:0}: request failed; check endpoint, credential and model configuration`,model,null,{},kind)
+      }
       let result
       try { result=openai?await readOpenAICompletion(response,model,{signal}):await readSummaryJson(response,signal);signal.throwIfAborted() }
       catch(error){if(signal.aborted)throw summaryFailure(outerSignal?.aborted?'Summary request cancelled':'Summary request timed out',model,null,{},outerSignal?.aborted?'cancelled':'timeout');if(error.summaryDiagnostic)throw error;throw summaryFailure('Malformed summary response; original content retained',model,null,{},'response_invalid')}
