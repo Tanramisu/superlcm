@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.28 — 2026-10-11
+
+- Fix DSH restored summary drafts that emitted a missing provider stream into strict native JSON events.
+- Let a validated completed DSH prefix release emergency context pressure without waiting forever for a failed later batch or merge. Preserve unfinished originals, tool boundaries, current human input and model/configuration identity.
+- Guard predicted post-replacement space and reject superseded late background results. Add eight real DSH synthetic regressions shared with standalone 0.5.31.
+
 ## 0.5.27
 
 - Separate the learned soft request length from the 6,000-character summary acceptance limit; let the learned ratio relax after smaller successful drafts.
