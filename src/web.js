@@ -66,13 +66,15 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
   const listView=(view,harness)=>{
     store.recoverSummaryRuns()
     const listing=store.listSessions(2147483647,0,harness,view)
-    return listing.sessions.filter(row=>summaryHealth(store,row.session,{env,recover:false}).needs_attention||view==='headless')
+    return listing.sessions.filter(row=>view==='headless'||summaryHealth(store,row.session,{env,recover:false,withEstimate:false}).needs_attention)
   }
   const routes = {
     'GET /api/conversations': url => {
       refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});store.recoverSummaryRuns()
       const view=url.searchParams.get('view')||'all',listing=store.listSessions(50,int(url.searchParams.get('offset'),0),url.searchParams.get('harness')||undefined,view)
-      return {...listing,sessions:listing.sessions.map(row=>({...row,headless:Boolean(row.headless),summary_health:summaryHealth(store,row.session,{env,recover:false})})),groups:store.harnessGroups(),attention_count:listView('attention').length,headless_count:store.listSessions(1,0,undefined,'headless').total}
+      // Listing status is indexed metadata. Work estimates verify every original
+      // record and belong to the selected detail/explicit generation preview.
+      return {...listing,sessions:listing.sessions.map(row=>({...row,headless:Boolean(row.headless),summary_health:summaryHealth(store,row.session,{env,recover:false,withEstimate:false})})),groups:store.harnessGroups(),attention_count:store.listSessions(0,0,undefined,'attention').total,headless_count:store.listSessions(0,0,undefined,'headless').total}
     },
     'GET /api/conversation': url => { const id = session(url);refreshConversationNames(store,{env,session:id,minIntervalMs:nameRefreshMs});const health=summaryHealth(store,id,{env});return { ...store.outline(id), writer_tool: writerTool(store.metadata(id).harness, env), bands: store.bands(id), setting: store.effectiveSetting(id, env), summarizing: health.active||store.summarizing(id),summary_health:health,summary_runs:store.summaryRunHistory(id),status: store.source(id).status, last_compaction: store.lastCompactionDiagnostic(id), reduced_summary_count: store.reducedSummaryCount(id), summary_error_detail: store.source(id).status === 'summary_error' ? store.summaryError(id) : null, backends: backends(id), estimate: health.estimate } },
     'GET /api/outline': url => store.outline(session(url), url.searchParams.get('node') || undefined),

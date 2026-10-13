@@ -238,6 +238,36 @@ test('Web exposes queued then starting, observes failures and groups headless ou
  assert.equal((await w.get('api/conversations?view=headless')).sessions[0].session,'exec')
 })
 
+test('list health preserves indexed failure and activity without reading originals or claiming coverage',t=>{
+ const f=fixture(t,3)
+ f.store.setStatus('s1','summary_error');startRun(f.store,'s2')
+ f.store.eventRowsFrom=()=>{throw Error('List status must not plan summary work')}
+ f.store.exact=()=>{throw Error('List status must not read originals')}
+ const health=id=>summaryHealth(f.store,id,{env:f.env,recover:false,withEstimate:false})
+ assert.equal(health('s0').state,'configured');assert.equal(health('s0').estimate,null)
+ assert.equal(health('s1').state,'failed');assert.equal(health('s1').needs_attention,true)
+ assert.equal(health('s2').state,'running');assert.equal(health('s2').active,true)
+ f.store.setHarnessSetting('claude-code','off');assert.equal(health('s0').state,'off')
+})
+
+test('real Web paginated listing and global counters never plan original-record summaries',async t=>{
+ const f=fixture(t,65);f.add('exec',{headless:true,harness:'codex'})
+ f.store.setStatus('s0','summary_error');f.store.setStatus('s64','summary_error');f.store.setStatus('exec','summary_error')
+ const store=new ClaudeStore(f.store.dir)
+ store.eventRowsFrom=()=>{throw Error('Listing scanned original records')}
+ store.exact=()=>{throw Error('Listing read original content')}
+ const web=await startWeb({store,env:f.env,spawnWorker:f.spawnProcess,discovery:async()=>[],catalog:async()=>({models:[]})})
+ t.after(()=>web.close())
+ const get=async path=>{const r=await fetch(web.url+path);assert.equal(r.status,200);return r.json()}
+ const all=await get('api/conversations');assert.equal(all.total,66);assert.equal(all.sessions.length,50)
+ assert.equal(all.attention_count,2);assert.equal(all.headless_count,1)
+ assert.ok(all.sessions.every(row=>row.summary_health.estimate===null))
+ const next=await get('api/conversations?offset=50');assert.equal(next.sessions.length,16);assert.equal(next.attention_count,2)
+ const attention=await get('api/conversations?view=attention');assert.equal(attention.total,2);assert.ok(attention.sessions.every(row=>row.summary_health.needs_attention))
+ const headless=await get('api/conversations?view=headless');assert.equal(headless.total,1);assert.equal(headless.sessions[0].session,'exec')
+ assert.equal(typeof (await get('api/harnesses')).version,'string')
+})
+
 test('bulk retry requires scoped preview and exact count, rejects changed settings and duplicate confirmation',async t=>{
  const f=fixture(t,2);f.add('exec',{headless:true,harness:'codex'});for(const id of ['s0','s1','exec'])f.store.setStatus(id,'summary_error')
  const w=await webFixture(t,f)

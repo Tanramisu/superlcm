@@ -7,7 +7,7 @@ const q = encodeURIComponent
 const NAMES = { codex: 'Codex', 'claude-code': 'Claude Code', hermes: 'Hermes', pi: 'Pi', dsh: 'dsh harness', opencode: 'OpenCode', gemini: 'Gemini CLI', import: t('导入'), legacy: t('早期记录') }
 const toolName = h => NAMES[h] || h
 const state = { view: 'conversations', listView:'all',harnesses: [], rows: [], total: 0, offset: 0, groups: [], h: '', sel: null, query: '', detail: null, open: new Set(), children: new Map(), target: null }
-const SUMMARY_LABELS={queued:'摘要已排队',starting:'摘要正在启动',running:'正在生成摘要',failed:'摘要失败',lost:'摘要进程已中断',behind:'有待写摘要',up_to_date:'完整片段已写完',off:'后台摘要已关闭',agent:'由对话模型生成',unconfigured:'摘要尚未配置'}
+const SUMMARY_LABELS={queued:'摘要已排队',starting:'摘要正在启动',running:'正在生成摘要',failed:'摘要失败',lost:'摘要进程已中断',behind:'有待写摘要',up_to_date:'完整片段已写完',configured:'后台摘要已配置',off:'后台摘要已关闭',agent:'由对话模型生成',unconfigured:'摘要尚未配置'}
 const ERROR_LABELS={rate_limit:'请求频率受限',auth:'身份验证失败',quota:'额度不足',timeout:'请求超时',quality:'摘要格式或语言不符',spawn:'进程启动失败',worker_lost:'进程意外结束'}
 const summaryPill=h=>h?'<span class="summary-pill '+esc(h.state)+'">'+esc(t(SUMMARY_LABELS[h.state]||h.state))+'</span>':''
 

@@ -4,7 +4,7 @@ const LANGS = {
   // Keys that need context to disambiguate; Chinese shows the short form.
   zh: { '关闭（摘要方式）': '关闭' },
   en: {
-    '摘要已排队':'Summary queued','摘要正在启动':'Summary starting','正在生成摘要':'Writing summaries','摘要失败':'Summary failed','摘要进程已中断':'Summary worker lost','有待写摘要':'Summaries pending','完整片段已写完':'Complete segments summarized','后台摘要已关闭':'Background summaries off','由对话模型生成':'Written by the chat model','摘要尚未配置':'Summary setup needed',
+    '摘要已排队':'Summary queued','摘要正在启动':'Summary starting','正在生成摘要':'Writing summaries','摘要失败':'Summary failed','摘要进程已中断':'Summary worker lost','有待写摘要':'Summaries pending','完整片段已写完':'Complete segments summarized','后台摘要已配置':'Background summaries configured','后台摘要已关闭':'Background summaries off','由对话模型生成':'Written by the chat model','摘要尚未配置':'Summary setup needed',
     '需要关注':'Needs attention','无交互任务':'Headless runs','批量重试…':'Bulk retry…','命令行工具':'CLI','确认排队':'Confirm queue',
     '先预览当前分组的会话数量和预计摘要段数，再确认调用。':'Preview the number of conversations and estimated summary pieces in this group before confirming calls.',
     '本次排队 {n} 个会话，预计 {c} 段摘要。':'Queue {n} conversations, about {c} summary pieces.',

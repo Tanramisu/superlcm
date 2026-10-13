@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — 2026-10-14
+
+- Fix the console remaining blank with “Detecting…” on large archives: conversation-list status and global attention counts now use indexed metadata instead of planning summary work over every archived original. Exact estimates remain available in conversation details and explicit generation previews. Add regression coverage for pagination, attention/headless counts and original-free list requests.
+
 ## 0.5.30 — 2026-10-11
 
 - Add one bounded current-conversation-model rescue for Claude takeover when prepared coverage or space remains insufficient. Reuse verified summaries, preserve the exact current request and recent tool-complete originals, and decline ambiguous sources.
