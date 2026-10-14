@@ -5,13 +5,13 @@ export function bodies(message) {
   if(message.toolBodies)return canonical(message.toolBodies)
   const out=[]
   for(const t of message.toolUses||[])if(typeof t==='object'){
-    const id=t.tool_use_id||t.id||t.call_id,name=t.name??t.tool_name
+    const id=t.tool_use_id||t.id||t.call_id,name=t.name??t.tool_name??t.tool
     let value=t.input??t.arguments
     if(typeof value==='string')try{value=JSON.parse(value)}catch{}
     if(id&&(name!==undefined||value!==undefined))out.push({id,kind:'use',...(name!==undefined?{name}:{}),...(value!==undefined?{value:canonical(value)}:{})})
   }
   for(const t of Array.isArray(message.toolResults)?message.toolResults:[])if(typeof t==='object'){
-    const id=t.tool_use_id||t.id||t.call_id,value=t.content??t.output??t.result,error=t.is_error??t.isError
+    const id=t.tool_use_id||t.id||t.call_id,value=t.content??t.output??t.result??t.text,error=t.is_error??t.isError
     if(id&&(value!==undefined||error!==undefined))out.push({id,kind:'result',...(value!==undefined?{value:canonical(value)}:{}),...(error!==undefined?{error}: {})})
   }
   return out

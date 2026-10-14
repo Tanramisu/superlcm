@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url'
 import {spawnSync} from 'node:child_process'
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..'),pkg=JSON.parse(readFileSync(resolve(root,'package.json')))
 assert.ok(process.env.npm_execpath,'Run with npm run verify:release')
-const stages=pkg.name==='SuperLcm'?['validate','test:install','test:package']:['validate','test:dsh-runtime','test:installed-package','test:package']
+const stages=pkg.name==='SuperLcm'?['validate','test:install','test:package']:['validate','test:claude-module','test:dsh-runtime','test:installed-package','test:package']
 for(const stage of stages){
  console.log('\nRelease verification: '+stage)
  const result=spawnSync(process.execPath,[process.env.npm_execpath,'run',stage],{cwd:root,env:process.env,stdio:'inherit'})

@@ -159,6 +159,8 @@ Claude, Claude Code, Codex, Hermes and Pi names and logos belong to their respec
 
 完整版与 DSH 独立版的关系、修复同步及验证范围见 [修复同步说明](docs/REPAIR-SYNC-0.5.23.md)。
 
+Claude 接管的真实宿主验证与社区修复见 [Claude 接管可靠性说明](docs/CLAUDE-RELIABILITY.md)。
+
 主动审查与发布前故障验证见 [发布验证说明](docs/RELEASE-VERIFICATION.md)。发布者运行 `npm run verify:release`，包含实际安装包、运行时和失败场景；两版共用修复在发布前核对一致。
 
 可靠性测试：`npm run test:reliability`；完整发布检查：`npm run verify:release`。覆盖范围见 [连续使用与故障恢复测试台](docs/RELIABILITY-LAB.md)。

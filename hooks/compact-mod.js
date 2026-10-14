@@ -13,6 +13,15 @@ import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
 // when the session ends, or after a failed call, goes to the separate `claude -p` worker as before.
 const cli = ($, command, id, stdin, { flags = [], timeoutMs = 60000 } = {}) => $.process.run(['node', `${$.plugin.root}/src/launch.js`, command, id, ...flags], { stdin: stdin ?? '', timeoutMs })
   .then(r => JSON.parse(r.stdout.trim().split('\n').at(-1) || '{}'))
+// Keep SDK capability calls in this module; Claude's loader does not follow
+// its $ context into imported helpers. The rescue worker gets plain callbacks.
+const rescueHost = $ => ({
+  root: $.plugin.root,
+  run: (args, options) => $.process.run(args, options),
+  usage: () => $.session.usage(),
+  model: () => $.session.model(),
+  complete: options => $.model.complete(options),
+})
 const MAX_PIECES = 2000 // a whole backlog in one background run (one at a time per session); turns never wait for it
 const writing = new Map(), ticked = new Map(), ticking = new Set(), ended = new Set()
 const outputs = new Map()
@@ -127,7 +136,8 @@ function summaryTick($,id) {
   const now=Date.now()
   if(ticking.has(id)||(ticked.has(id)&&now-ticked.get(id)<45000))return
   ticked.set(id,now);ticking.add(id)
-  void cli($,'summary-tick',id).then(reply=>{if(reply.host&&!ended.has(id))return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
+  void Promise.resolve().then(()=>$.session.usage()).then(u=>['--tokens',String(u?.context?.tokens||0),'--window',String(u?.context?.window||0)],()=>[])
+    .then(flags=>cli($,'summary-tick',id,'',{flags})).then(reply=>{if(reply.host&&!ended.has(id))return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
 }
 const toInput = messages => messages.map(m => ({ role: m.role, text: m.text.slice(0, 2000), toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolResults: m.toolResults?.length ? 1 : 0, size: m.text.length + JSON.stringify(m.toolUses || []).length + JSON.stringify(m.toolResults || []).length + 200 }))
 async function packet($, id, messages, instructions, trigger, extra = {}) {
@@ -145,9 +155,9 @@ export function register(on) {
     if (!e.agentId) $.session.id().then(id => writeSummaries($, id)).catch(() => {})
     return next(e)
   })
-  on('turn.step', ($, e, next) => {
+  on('turn.step', async function* ($, e, next) {
     if(!e.agentId)try{Promise.resolve($.session.id()).then(id=>summaryTick($,id)).catch(()=>{})}catch{}
-    return next(e)
+    return yield* next(e)
   })
   on('session.end', async ($, e, next) => {
     if(e.agentId)return next(e)
@@ -170,6 +180,13 @@ export function register(on) {
     try {
       id=await $.session.id()
       plan = await packet($, id, e.messages, e.instructions, e.trigger)
+      // Native precompute is kept until the threshold without dispatching this
+      // hook again. Defer only eligible, active summary work and never rescue
+      // merely for precompute. Actual pressure still has bounded native handoff.
+      if(e.trigger==='precompute'&&plan?.retry&&!plan.use&&!ended.has(id)&&!e.signal?.aborted){
+        if(plan.retry==='host')void writeSummaries($,id).catch(()=>{})
+        return {skip:'SuperLcm summaries are catching up'}
+      }
       if(plan?.catchup?.host){
         const ms=Math.min(Math.max(0,Number(plan.catchup.deadlineMs)||0),240000),started=Date.now()
         let timer,cancel
@@ -181,7 +198,7 @@ export function register(on) {
         finally{clearTimeout(timer);if(cancel)e.signal.removeEventListener('abort',cancel)}
         plan=await packet($,id,e.messages,e.instructions,e.trigger,{afterCatchup:true,catchupMs:Date.now()-started})
       }
-      if(!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude($,id,e)||plan
+      if(e.trigger!=='precompute'&&!plan?.use&&plan?.rescue&&!ended.has(id)&&!e.signal?.aborted)plan=await rescueClaude(rescueHost($),id,e)||plan
     } catch { plan = null;try{await cli($,'compact-diagnostic',await $.session.id())}catch{} }
     if (!ended.has(id)&&!e.signal?.aborted&&plan?.use && plan.start > 0 && plan.start < e.messages.length)
       return { messages: [{ role: 'user', text: plan.packet, toolUses: [] }, ...e.messages.slice(plan.start)] }

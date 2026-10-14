@@ -156,7 +156,10 @@ test('actual compact-packet writes decline, exception and success diagnostics to
  assert.equal(store.lastCompactionDiagnostic('s').trigger,'auto')
  assert.equal(run('bad SECRET CREDENTIAL json').error,true)
  assert.equal(store.lastCompactionDiagnostic('s').status,'error');assert.doesNotMatch(JSON.stringify(store.lastCompactionDiagnostic('s')),/SECRET|CREDENTIAL/)
- const diagnostics=spawnSync(process.execPath,['src/cli.js','doctor-local'],{env,encoding:'utf8'})
+ // This case checks stored diagnostics, not the developer's installed tools.
+ // Never discover real logins or wait on host MCP commands during this test.
+ const diagnosticEnv={...env,...Object.fromEntries(['SUPERLCM_CLAUDE_CLI_BIN','SUPERLCM_CODEX_CLI_BIN','SUPERLCM_HERMES_BIN','SUPERLCM_PI_BIN','SUPERLCM_DSH_BIN'].map(key=>[key,join(dir,'uninstalled-'+key)]))}
+ const diagnostics=spawnSync(process.execPath,['src/cli.js','doctor-local'],{env:diagnosticEnv,encoding:'utf8',timeout:15000})
  assert.equal(diagnostics.status,0,diagnostics.stderr)
  assert.equal(JSON.parse(diagnostics.stdout).compaction_diagnostics[0].code,'planner_exception')
  store.addNode({session:'s',id:'ready',level:0,first:0,last:1,children:[],summary:'Effective constraints preserved.',digest:'fixture',model:'fixture'})

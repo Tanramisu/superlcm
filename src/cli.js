@@ -226,7 +226,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
         const current=store.takeover()
         if(!current.enabled)return {use:false,reason:'compaction takeover is off'}
         const context=verifiedCompactionInput(store,session,input.messages||[])
-        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:Math.min(input.window||current.window,current.window),keepTokens:current.keep})
+        return planCompaction({meta:store.metadata(session),events:context.events,nodes:claudeCompactionNodes(store,session),messages:context.messages,instructions:input.instructions||'',tokens:input.tokens||0,window:Math.min(input.window||current.window,current.window),keepTokens:current.keep,trigger:input.trigger})
       }
       const note=(result,stage,catchupMs=null)=>store.noteCompaction(session,{...compactionDiagnostic(result,{nodes:store.nodeRows(session,0),records:store.stats(session).records,before:input.tokens||0,trigger:input.trigger}),stage:stage||(result.stage==='inline'||result.inline?'inline':'first'),pending:pendingLeaves(store,session),after:result.after??null,catchupMs})
       const notePlan=(result,stage,ms=null)=>{
@@ -236,7 +236,12 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       reply=plan()
       notePlan(reply,input.afterCatchup?'catchup':null,input.afterCatchup&&Number.isFinite(input.catchupMs)?input.catchupMs:null)
       const eligible=['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)
-      if(!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
+      const chosen=effective(store,session),harness=store.metadata(session).harness
+      const mayWrite=store.integrationEnabled(harness)&&harness==='claude-code'&&['cli','api'].includes(chosen.mode)
+      if(!reply.use&&!reply.ambiguous&&eligible&&mayWrite){
+        store.setSummaryFlush(session,store.db.prepare('SELECT MAX(ordinal) AS o FROM events WHERE session=?').get(session)?.o??-1)
+      }
+      if(input.trigger!=='precompute'&&!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
         const pending=pendingLeaves(store,session),deadlineMs=catchupDeadlineMs(),chosen=effective(store,session),harness=store.metadata(session).harness
         if(deadlineMs>0&&pending>=1&&pending<=4&&store.integrationEnabled(harness)&&['cli','api'].includes(chosen.mode)){
           if(chosen.mode==='cli'&&writerTool(harness)==='claude-code')reply={...reply,catchup:{host:true,deadlineMs,maxPieces:4}}
@@ -246,6 +251,18 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
             reply=plan();reply.catchup=true
             notePlan(reply,'catchup',Date.now()-started)
           }
+        }
+      }
+      // Schedule only after bounded caller catch-up has had its chance. A
+      // competing worker must not steal its lease or publish its late result.
+      if(!reply.use&&!reply.ambiguous&&mayWrite&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)){
+        const work=summaryWork(store,session),revision=summarySettingsRevision(store,session)
+        if(work&&!store.summaryRetry(session,work.batch_id,revision)){
+          reply.retry=chosen.mode==='cli'&&writerTool(harness)==='claude-code'?'host':true
+          if(reply.retry!=='host'&&!reply.catchup)try{
+            const scheduled=scheduleSummary(store,session,chosen.mode,chosen.model)
+            if(!scheduled&&!store.summarizing(session)&&!activeSummaryRun(store,session))delete reply.retry
+          }catch{delete reply.retry}
         }
       }
       if(reply.use)store.noteTakeover(session,input.tokens||0,reply.after||0)
@@ -258,7 +275,8 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
 } else if (command==='summary-tick') {
   const store=new ClaudeStore()
   let reply
-  try{reply=summaryTick(store,rest[0])}catch{reply={error:'Summary tick failed; originals retained'}}
+  const flag=name=>{const at=rest.indexOf(name),n=at<0?0:Number(rest[at+1]);return Number.isSafeInteger(n)&&n>0?n:0}
+  try{reply=summaryTick(store,rest[0],{tokens:flag('--tokens'),window:flag('--window')})}catch{reply={error:'Summary tick failed; originals retained'}}
   finally{store.close()}
   process.stdout.write(JSON.stringify(reply)+'\n')
 } else if (['summary-host','summary-claim','summary-save','summary-handoff','summary-check','summary-release'].includes(command)) {

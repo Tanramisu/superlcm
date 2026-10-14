@@ -133,6 +133,28 @@ for(const kind of ['use','result'])test('a changed live tool '+kind+' payload ca
   const hook=await h.hook();assert.equal((await hook.run()).fallback,true);assert.equal(h.calls.length,0);assert.equal(h.unchanged(before).nodes.length,before.nodes.length)
 })
 
+for(const mode of ['unchanged','changed-result','changed-tool'])test('actual Claude SDK tool/text fields verify archive source: '+mode,async()=>{
+  const h=fixture();await h.seed();const before=h.snapshot(),legacyBodies=h.messages.map(m=>liveMessage(m).toolBodies)
+  const messages=h.messages.map(m=>({...m,
+    toolUses:m.toolUses.map(t=>({tool_use_id:t.tool_use_id,tool:t.name,input:t.input})),
+    toolResults:m.toolResults.map(t=>({tool_use_id:t.tool_use_id,text:t.content,isError:!!t.is_error})),
+  }))
+  if(mode==='changed-result')messages.find(m=>m.toolResults.length).toolResults[0].text='Changed unarchived SDK output'
+  if(mode==='changed-tool')messages.find(m=>m.toolUses.length).toolUses[0].tool='different_unarchived_tool'
+  // First exercise raw DTOs over the real CLI boundary, then the sandbox helper.
+  const prepared=await h.cli('compact-rescue-prepare',{messages,tokens:h.tokens,window:h.window,model:'offline-current',trigger:'auto'})
+  assert.equal(!!prepared.work,mode==='unchanged')
+  if(prepared.work)await h.cli('compact-rescue-stop',{node_id:prepared.work.node_id,claim_id:prepared.work.claim_id,input_hash:prepared.work.input_hash})
+  h.messages=messages
+  if(mode!=='unchanged'){
+    const hook=await h.hook();assert.equal((await hook.run()).fallback,true);assert.equal(h.calls.length,0)
+  }else{
+    const normalized=bodies=>bodies.map(items=>items.map(b=>b.kind==='result'?{...b,error:b.error??false}:b))
+    assert.deepEqual(normalized(messages.map(m=>liveMessage(m).toolBodies)),normalized(legacyBodies))
+  }
+  assert.deepEqual(h.unchanged(before).nodes,before.nodes)
+})
+
 test('repeated short human prompts cannot borrow a different task authorization',async()=>{
   const rows=history();for(const r of rows)if(r.type==='user'&&typeof r.message.content==='string')r.message.content='Continue.'
   const h=fixture({rows});await h.seed();const hook=await h.hook();assert.equal((await hook.run()).fallback,true);assert.equal(h.calls.length,0)
