@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.32 — 2026-10-14
+
+- DSH emergency requests now reuse safe completed prefixes during later raw generation and inspect progress after each batch, with one configured total deadline. Preserve current input, unfinished originals, tree references and late-result cancellation fences.
+- The console list now refreshes its summary badge from live detail polling, so successful retries do not keep showing an obsolete failure.
+
 ## 0.5.31 — 2026-10-14
 
 - Fix the console remaining blank with “Detecting…” on large archives: conversation-list status and global attention counts now use indexed metadata instead of planning summary work over every archived original. Exact estimates remain available in conversation details and explicit generation previews. Add regression coverage for pagination, attention/headless counts and original-free list requests.
