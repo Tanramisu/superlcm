@@ -299,6 +299,21 @@ test('the actual detail polling continues for queued and starting records withou
  detail.summary_health.state='starting';await runInNewContext('loadDetail()',context);assert.deepEqual(timers,[3000,3000])
 })
 
+test('detail polling replaces a stale failed list badge while retry progresses and completes',async()=>{
+ const code=readFileSync(new URL('../src/web-client.js',import.meta.url),'utf8'),start=code.indexOf('async function loadDetail('),end=code.indexOf('const pct = (x, total)'),badges=[],timers=[]
+ let detail={summary_health:{state:'running',active:true,run:{created_parts:2}},summarizing:true}
+ const row={session:'s',summary_health:{state:'failed',active:false}},other={session:'other',summary_health:{state:'failed'}}
+ const context={state:{sel:'s',rows:[row,other]},api:async()=>detail,q:encodeURIComponent,renderDetail(){},renderList(){badges.push(row.summary_health.state)},clearTimeout(){},setTimeout:(_,ms)=>{timers.push(ms)},act:fn=>fn()}
+ await runInNewContext(code.slice(start,end)+'\nloadDetail()',context)
+ assert.deepEqual(badges,['running']);assert.equal(row.summary_health.run.created_parts,2);assert.equal(other.summary_health.state,'failed')
+ detail={summary_health:{state:'up_to_date',active:false},summarizing:false}
+ await runInNewContext('loadDetail()',context)
+ assert.deepEqual(badges,['running','up_to_date']);assert.deepEqual(timers,[3000])
+ context.state.sel='different';detail={summary_health:{state:'failed',active:false}}
+ await runInNewContext('loadDetail()',context)
+ assert.equal(row.summary_health.state,'up_to_date')
+})
+
 test('queued host is stopped on settings changes and explicit API retry atomically replaces an idle host',t=>{
  const f=fixture(t,2),blocker=startRun(f.store,'s0','blocker');f.env.SUPERLCM_SUMMARY_CONCURRENCY='1'
  assert.match(f.cli('summary-claim','s1').none,/queue/);const old=f.store.latestSummaryRun('s1');assert.equal(old.route,'host')

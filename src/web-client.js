@@ -196,6 +196,11 @@ async function loadDetail() {
   const detail = await api('/api/conversation?session=' + q(session))
   if (session !== state.sel) return
   state.detail = detail
+  const row = state.rows?.find(row => row.session === session)
+  if (row) {
+    row.summary_health = detail.summary_health
+    renderList()
+  }
   renderDetail()
   clearTimeout(loadDetail.timer)
   if (detail.summary_health?.active||detail.summarizing) loadDetail.timer = setTimeout(() => act(loadDetail), 3000)
