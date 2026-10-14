@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased — 2026-10-14
+## 0.5.31 — 2026-10-14
 
 - Fix the console remaining blank with “Detecting…” on large archives: conversation-list status and global attention counts now use indexed metadata instead of planning summary work over every archived original. Exact estimates remain available in conversation details and explicit generation previews. Add regression coverage for pagination, attention/headless counts and original-free list requests.
+- Fix DSH pressure failures caused by large fixed system/tool prompts squeezing the automatic summary budget down to 1K. Keep fixed costs outside the normal summary/recent-original budgets, while preserving the user threshold and rejecting impossible space limits. Shared with standalone DSH 0.5.33.
 
 ## 0.5.30 — 2026-10-11
 

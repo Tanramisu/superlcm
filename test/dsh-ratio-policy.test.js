@@ -16,12 +16,20 @@ test('thresholds use current input capacity after output reservation',()=>{
 test('fixed tools and system costs count toward the post-compaction target',()=>{
   const policy=deriveRatioPolicy({foldBatchTokens:20000},{contextWindow:100000,fixedTokens:12000})
   assert.equal(policy.minRetainTokens,4000)
-  assert.equal(policy.postTargetTokens,17024)
-  assert.equal(policy.summaryPrefixTargetTokens,1024)
+  assert.equal(policy.postTargetTokens,22000)
+  assert.equal(policy.summaryPrefixTargetTokens,6000)
   const small=deriveRatioPolicy({foldBatchTokens:20000},{contextWindow:8000})
   assert.ok(small.foldBatchTokens<20000)
   assert.ok(small.minRetainTokens+small.summaryPrefixTargetTokens<small.softActiveTokens)
   assert.throws(()=>deriveRatioPolicy({foldBatchTokens:20000},{contextWindow:8000,fixedTokens:6500}))
+})
+test('large fixed costs keep a viable summary budget below the normal switch threshold',()=>{
+  const policy=deriveRatioPolicy({foldBatchTokens:20000},{contextWindow:500000,fixedTokens:48385})
+  assert.equal(policy.summaryPrefixTargetTokens,30000)
+  assert.equal(policy.postTargetTokens,98385)
+  assert.equal(policy.postTargetTokens,48385+policy.minRetainTokens+policy.summaryPrefixTargetTokens)
+  assert.ok(policy.postTargetTokens<policy.softActiveTokens)
+  assert.throws(()=>deriveRatioPolicy({foldBatchTokens:20000},{contextWindow:100000,fixedTokens:78000}),/无法容纳/)
 })
 test('unknown capacities and unordered thresholds are rejected',()=>{
   assert.throws(()=>deriveRatioPolicy({foldBatchTokens:20000},{}))
