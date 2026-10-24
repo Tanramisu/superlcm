@@ -33,3 +33,37 @@ test('Pi refuses transformed source, incomplete output and tool-call summary',as
  assert.throws(()=>parseForkSummary('{"blocks":[{"index":1,"summary":"# wrong"}]}',[{index:0}]),/顺序/)
  assert.throws(()=>parseForkSummary('{"blocks":[]}',[{index:0}]),/缺失/)
 })
+
+for (const fault of ['cancel', 'timeout']) test('Pi bounds a branch whose provider ignores '+fault,async()=>{
+ let release,started,wireOptions
+ const blocked=new Promise(resolve=>{release=resolve}),begun=new Promise(resolve=>{started=resolve})
+ const controller=new AbortController()
+ const ctx={model:capture.model,modelRegistry:{streamSimple(_m,_c,options){
+   wireOptions=options
+   options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:'directive'}]})
+   started()
+   return {result:()=>blocked}
+ }}}
+ const work=summarizePiFork(ctx,snapshot,capture,{signal:controller.signal,stage:async()=>{},timeoutMs:20})
+ const outcome=work.then(()=> 'accepted',()=> 'rejected')
+ await begun
+ if(fault==='cancel')controller.abort(Error('synthetic cancellation'))
+ const observed=await Promise.race([outcome,new Promise(resolve=>setTimeout(()=>resolve('hung'),100))])
+ release({stopReason:'stop',content:[{type:'text',text:'# Historical state\nPending inspection.'}]})
+ await outcome
+ assert.equal(observed,'rejected','provider cooperation must not be needed to stop waiting')
+ assert.throws(()=>wireOptions.onPayload({...payload,messages:[...payload.messages,{role:'user',content:'late directive'}]}))
+})
+
+test('Pi checks the entire replayed wire request including tools before sending a summary', async () => {
+ const native={...payload,tools:[{description:'中'.repeat(40000)}]}
+ const captured={...capture,payload:native,model:{...capture.model,contextWindow:32000,maxTokens:2048}}
+ let dispatches=0
+ const ctx={model:captured.model,modelRegistry:{streamSimple(_m,_c,options){
+   options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:'directive'}]})
+   dispatches++
+   return {result:async()=>({})}
+ }}}
+ await assert.rejects(summarizePiFork(ctx,snapshot,captured,{stage:async()=>{}}),/最终请求/)
+ assert.equal(dispatches,0)
+})

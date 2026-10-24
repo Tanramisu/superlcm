@@ -46,7 +46,8 @@ export function piPreparationRevision(store, session, env = process.env) {
   return policy.summaryMode === 'main-fork' ? forkHash(['pi-main-fork-tree-v2', policy]) : summarySettingsRevision(store, session, env)
 }
 export function stagePi(store, input, { env = process.env } = {}) {
-  if (!readPiPolicy(store.dir).enabled || !store.integrationEnabled('pi')) throw Error('Pi 压缩接管未启用')
+  const policy = readPiPolicy(store.dir)
+  if ((!policy.enabled && !policy.summaryEnabled) || !store.integrationEnabled('pi')) throw Error('Pi 后台摘要未启用')
   const captured = capturePi(store, input, { env, automatic: true })
   if (captured.skipped) throw Error('Pi 原文归档尚未完成')
   activeBranch(store, captured.session, input.leafId, input.firstKeptEntryId)

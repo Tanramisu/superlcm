@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ClaudeStore } from '../src/store.js'
-import { compactPi, preparePi, readPreparedPi, piSourceChunks, readPiPolicy, savePiPolicy } from '../src/pi-compaction.js'
+import { compactPi, preparePi, readPreparedPi, stagePi, piSourceChunks, readPiPolicy, savePiPolicy } from '../src/pi-compaction.js'
 import { registerPiCompaction, serializePiMessages, piCompactRequest } from '../src/pi-runtime.js'
 import { estimateSummaryTokens } from '../src/summary-tokens.js'
 import { makePiSnapshot, snapshotMatches } from '../src/pi-snapshot.js'
@@ -88,7 +88,7 @@ test('Pi serializer keeps long tool results, failure evidence and call identifie
     { role: 'toolResult', toolCallId: 'call-1', isError: true, content: [{ type: 'text', text }] }])
   assert.ok(output.includes(text)); assert.match(output, /ERROR \/ failed/); assert.match(output, /call-1/)
 })
-function runtime({ tokens = 70000, idle = false, responder, compactEffect, readPolicy = () => ({ enabled: true, ratio: .8 }) } = {}) {
+function runtime({ tokens = 70000, idle = false, responder, compactEffect, guardTimeoutMs, readPolicy = () => ({ enabled: true, ratio: .8 }) } = {}) {
   const handlers = new Map(), commands = [], draft = {}, settings = { compaction: { keepRecentTokens: 512 } }
   const rows = [
     { sourceEntry: { id: 'u1', type: 'message' }, messages: [{ role: 'user', content: 'Original request. ' + 'constraint '.repeat(1000) }] },
@@ -109,7 +109,7 @@ function runtime({ tokens = 70000, idle = false, responder, compactEffect, readP
     if (options.command === 'pi-prepare') { draft.snapshot = input; draft.signal = signal; return pending }
     return Promise.resolve(draft.prepared)
   }
-  api = registerPiCompaction({ on: (name, fn) => handlers.set(name, fn), getSettings: () => settings, registerCommand() {}, appendEntry: (type, data) => deferredInputs.push({ type, data }) }, { home: '/unused' }, { policy: readPolicy, request })
+  api = registerPiCompaction({ on: (name, fn) => handlers.set(name, fn), getSettings: () => settings, registerCommand() {}, appendEntry: (type, data) => deferredInputs.push({ type, data }) }, { home: '/unused' }, { policy: readPolicy, request, guardTimeoutMs })
   const complete = async () => {
     draft.prepared = { draftKey: draft.snapshot.draftKey, compaction: { summary, firstKeptEntryId: draft.snapshot.firstKeptEntryId, tokensBefore: 70000, details: { model: 'fixture-luna' } } }
     resolvePrepare(draft.prepared); await api.getState()?.promise
@@ -246,7 +246,9 @@ test('a large but admissible input recovers by compacting old history before the
   const input = r.handlers.get('input')({ text: '新'.repeat(30000) }, r.ctx)
   await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(r.commands, ['pi-prepare'])
   await r.complete()
-  assert.equal(await input, undefined); assert.equal(r.compactCalls, 1); assert.equal(r.deferredInputs.length, 0)
+  assert.equal(await input, undefined); assert.equal(r.compactCalls, 1)
+  assert.equal(r.deferredInputs.length, 1, 'input is preserved before the cancellable wait, including successful recovery')
+  assert.equal(r.deferredInputs[0].data.text, '新'.repeat(30000))
 })
 test('final request gate includes prompt expansion and tool declarations in the actual messages', () => {
   const r = runtime({ tokens: 1000 })
@@ -316,4 +318,158 @@ test('Pi main-fork stores provider usage and blocks without touching the indepen
   savePiPolicy(f.store,{enabled:true,ratio:.9,summaryMode:'main-fork'})
   assert.equal(readPreparedPi(f.store,input,{env:f.env}),null)
   await assert.rejects(preparePi(f.store,input,options),/设置已变化/)
+})
+
+test('Pi pressure wait has one deadline even if the backend never resolves', async () => {
+  const r = runtime({ guardTimeoutMs: 20 }); await turn(r); r.ctx.tokens = 95000
+  const guarded = turn(r)
+  const observed = await Promise.race([guarded.then(() => 'settled'), new Promise(resolve => setTimeout(() => resolve('hung'), 100))])
+  await r.complete(); await guarded
+  assert.equal(observed, 'settled')
+  assert.equal(r.abortCalls, 1)
+  assert.equal(r.draft.signal.aborted, true)
+  assert.equal(r.api.getState(), null)
+})
+
+test('Pi shutdown during a pressure wait cannot purchase a replacement worker', async () => {
+  const r = runtime(); await turn(r); r.ctx.tokens = 95000
+  const guarded = turn(r)
+  r.handlers.get('session_shutdown')()
+  r.rejectPrepare(Error('worker cancelled by shutdown'))
+  await guarded
+  assert.equal(r.commands.filter(c => c === 'pi-prepare').length, 1)
+  assert.equal(r.api.getState(), null)
+})
+
+test('Pi checks the final native tools payload before dispatching a provider request', () => {
+  const r = runtime({ readPolicy: () => ({ enabled: true, summaryEnabled: true, summaryMode: 'main-fork', ratio: .8 }) })
+  r.handlers.get('context_with_system')({ messages: [{ role: 'system', content: 'Small system prompt.' }] }, r.ctx)
+  r.handlers.get('before_provider_request')({ payload: { messages: [{ role: 'user', content: 'small' }], tools: [{ name: 'large_schema', description: '巨'.repeat(120000) }] } }, r.ctx)
+  assert.equal(r.abortCalls, 1)
+  assert.equal(r.api.getState(), null)
+})
+
+test('Pi final payload reserves the actual requested output limit in API mode too', () => {
+  const r = runtime({ tokens: 1000, readPolicy: () => ({ enabled: true, summaryMode: 'api', ratio: .8 }) })
+  r.handlers.get('before_provider_request')({ payload: { messages: [{ role: 'user', content: '中'.repeat(15000) }], max_tokens: 90000 } }, r.ctx)
+  assert.equal(r.abortCalls, 1)
+})
+
+test('Pi native image payloads count visual tokens instead of encoded image bytes', () => {
+  for (const image of [{ type: 'image_url', image_url: { url: 'data:image/png;base64,'+'a'.repeat(1000000) } }, { type: 'input_image', image_url: 'data:image/png;base64,'+'a'.repeat(1000000) }, { inlineData: { mimeType: 'image/png', data: 'a'.repeat(1000000) } }]) {
+    const r = runtime({ tokens: 1000 })
+    r.handlers.get('before_provider_request')({ payload: { messages: [{ role: 'user', content: [image] }] } }, r.ctx)
+    assert.equal(r.abortCalls, 0)
+  }
+})
+
+test('Pi bounds a compaction callback that never arrives', async () => {
+  const r = runtime({ guardTimeoutMs: 20 }); await turn(r); await r.complete()
+  r.ctx.tokens = 80000; r.ctx.idle = true
+  const result = await Promise.race([r.handlers.get('input')({ text: 'Retain this input while replacing.' }, r.ctx).then(() => 'settled'), new Promise(resolve => setTimeout(() => resolve('hung'), 100))])
+  assert.equal(result, 'settled'); assert.equal(r.compactCalls, 1)
+  assert.equal(r.deferredInputs[0].data.text, 'Retain this input while replacing.')
+  r.handlers.get('session_shutdown')()
+})
+
+test('Pi late lookup from an old session cannot discard a new ready draft', async () => {
+  let release, delay = false
+  const r = runtime({ responder: async (opts, snapshot) => {
+    if (opts.command === 'pi-prepare') { r.draft.snapshot = snapshot; return { compaction: { summary, firstKeptEntryId: snapshot.firstKeptEntryId } } }
+    if (delay) return new Promise(resolve => { release = resolve })
+    return { compaction: { summary, firstKeptEntryId: r.draft.snapshot.firstKeptEntryId } }
+  } })
+  await turn(r); await r.api.getState().promise
+  delay = true; const lookup = r.api.ready(r.ctx)
+  r.handlers.get('session_before_switch')(); delay = false
+  await turn(r); await r.api.getState().promise
+  const newer = r.api.getState()
+  release({ compaction: { summary, firstKeptEntryId: r.draft.snapshot.firstKeptEntryId } })
+  assert.equal(await lookup, null); assert.equal(r.api.getState(), newer)
+  r.handlers.get('session_shutdown')()
+})
+
+test('Pi late replacement callback cannot clear a new session draft', async () => {
+  const r = runtime({ guardTimeoutMs: 1000 }); await turn(r); await r.complete()
+  let callbacks
+  r.ctx.compact = options => { callbacks = options }
+  r.ctx.tokens = 80000; r.ctx.idle = true
+  const input = r.handlers.get('input')({ text: 'Input awaiting compaction' }, r.ctx)
+  await new Promise(resolve => setImmediate(resolve)); assert.ok(callbacks)
+  r.handlers.get('session_before_switch')(); r.ctx.tokens = 70000; r.ctx.idle = false
+  await turn(r); await r.api.getState().promise
+  const newer = r.api.getState()
+  callbacks.onComplete(); await input
+  assert.equal(r.api.getState(), newer)
+  assert.equal(r.deferredInputs[0].data.text, 'Input awaiting compaction')
+  r.handlers.get('session_shutdown')()
+})
+
+test('Pi final payload rejects invalid output reservations and covers native Google settings', () => {
+  for (const fields of [{ max_tokens: NaN }, { max_output_tokens: -1 }, { maxTokens: '1000' }, { generationConfig: { maxOutputTokens: 99000 } }]) {
+    const r = runtime()
+    r.handlers.get('before_provider_request')({ payload: { messages: [{ role: 'user', content: '中'.repeat(3000) }], ...fields } }, r.ctx)
+    assert.equal(r.abortCalls, 1)
+  }
+})
+
+test('Pi consecutive summary failures back off and a model change clears the old cooldown', async () => {
+  const originalNow = Date.now; let now = 0
+  Date.now = () => now
+  const r = runtime({ responder: async () => { throw Error('synthetic transient summary failure') } })
+  const attempt = async () => { await turn(r); await new Promise(resolve => setImmediate(resolve)) }
+  try {
+    await attempt(); assert.equal(r.commands.length, 1)
+    now = 61000; await attempt(); assert.equal(r.commands.length, 2)
+    now = 122000; await attempt(); assert.equal(r.commands.length, 2, 'second failure waits two minutes')
+    now = 182000; await attempt(); assert.equal(r.commands.length, 3)
+    now = 243000; await attempt(); assert.equal(r.commands.length, 3, 'third failure waits four minutes')
+    r.ctx.model.id = 'new-model'; await attempt(); assert.equal(r.commands.length, 4)
+  } finally { r.handlers.get('session_shutdown')(); Date.now = originalNow }
+})
+
+test('Pi treats an empty backend preparation response as a failure that can retry', async () => {
+  const originalNow = Date.now; let now = 0
+  Date.now = () => now
+  const r = runtime({ responder: async () => null })
+  try {
+    await turn(r); await new Promise(resolve => setImmediate(resolve))
+    assert.equal(r.api.getState(), null, 'an empty response must not strand a permanently pending draft')
+    now = 61000; await turn(r); await new Promise(resolve => setImmediate(resolve))
+    assert.equal(r.commands.length, 2)
+  } finally {r.handlers.get('session_shutdown')(); Date.now = originalNow}
+})
+
+test('Pi late compaction callbacks cannot discard a draft for a newly selected model', async () => {
+  const r = runtime({ guardTimeoutMs: 1000 }); await turn(r); await r.complete()
+  let callbacks
+  r.ctx.compact = options => { callbacks = options }
+  r.ctx.tokens = 80000; r.ctx.idle = true
+  const input = r.handlers.get('input')({ text: 'Input during a model change' }, r.ctx)
+  await new Promise(resolve => setImmediate(resolve)); assert.ok(callbacks)
+  r.ctx.model.id = 'new-model'; r.ctx.tokens = 70000; r.ctx.idle = false
+  r.handlers.get('model_select')({}, r.ctx); await r.api.getState().promise
+  const newer = r.api.getState()
+  callbacks.onComplete(); assert.deepEqual(await input, { action: 'handled' })
+  assert.equal(r.api.getState(), newer)
+  r.handlers.get('session_shutdown')()
+})
+
+test('Pi archives a native summary source with takeover off and background summaries on', t => {
+  const f = fixture(t)
+  f.store.setHarnessSetting('pi', 'main-fork')
+  savePiPolicy(f.store, { enabled: false, ratio: .8 })
+  assert.equal(readPiPolicy(f.store.dir).summaryEnabled, true)
+  assert.equal(stagePi(f.store, f.input, { env: f.env }).archived, true)
+})
+
+test('Pi background failure tolerates a policy that became unreadable during generation', async () => {
+  let broken = false
+  const r = runtime({ readPolicy: () => { if (broken) throw Error('invalid policy'); return { enabled: true, ratio: .8 } } })
+  await turn(r)
+  const work = r.api.getState().promise
+  broken = true; r.rejectPrepare(Error('synthetic request failure'))
+  await assert.doesNotReject(work)
+  assert.equal(r.api.getState(), null)
+  r.handlers.get('session_shutdown')()
 })

@@ -12,10 +12,16 @@ import { savePiPolicy } from '../src/pi-compaction-policy.js'
 import { readApiKey, saveApiKey } from '../src/api-credentials.js'
 import { findCli } from '../src/runtime.js'
 const mainFork = process.argv.includes('--main-fork')
+const passive = process.argv.includes('--passive-only')
 const live = process.argv.includes('--live-luna'), dir = mkdtempSync(join(tmpdir(), 'superlcm-pi-background-'))
 const slow = process.argv.includes('--slow-luna'), fail = process.argv.includes('--fail-luna'), cold = process.argv.includes('--cold-input')
 const huge = process.argv.includes('--huge-tool-output'), largeInput = process.argv.includes('--oversized-input')
-assert.ok(!live || !(slow || fail || cold || huge || largeInput), 'fault injection uses only the local endpoint')
+const nativePayload = process.argv.includes('--oversized-native-payload'), nativeOutput = process.argv.includes('--oversized-native-output')
+const malformed = process.argv.includes('--malformed-summary'), missing = process.argv.includes('--missing-summary-node'), truncated = process.argv.includes('--truncated-summary')
+const badSummary = malformed || missing || truncated, nativeFault = nativePayload || nativeOutput
+assert.ok(!live || !(slow || fail || cold || huge || largeInput || nativeFault || badSummary), 'fault injection uses only the local endpoint')
+assert.ok(!(nativeFault || badSummary) || mainFork, 'native fork faults require --main-fork')
+assert.ok(!passive || mainFork && !live && !slow && !fail && !nativeFault && !badSummary, 'passive fixture uses the local native branch')
 const agentDir = join(dir, 'agent'), cwd = join(dir, 'work'), sessions = join(agentDir, 'sessions')
 for (const path of [agentDir, cwd, sessions, join(agentDir, 'extensions')]) mkdirSync(path, { recursive: true })
 process.env.PI_CODING_AGENT_DIR = agentDir
@@ -48,16 +54,18 @@ try {
       if(fail){res.writeHead(503);res.end('synthetic branch failure');return}
       if(slow)await new Promise(resolve=>setTimeout(resolve,400))
       const plan=JSON.parse(directive.split('\n').find(line=>line.startsWith('[{"index":')))
+      if(missing)plan.pop()
       content=JSON.stringify({blocks:plan.map(part=>({index:part.index,summary:'# 当前状态\n检查尚未结束。部署必须另行获得用户明确授权。原始路径和证据请回查。'}))});tokens=500
+      if(malformed)content='invalid JSON from synthetic summary provider'
     }else{
       mainPayloads.push(body);mainCalls++;mainStartedResolve();tool=mainCalls< (slow?2:3)
-      if(mainCalls=== (slow?2:3)){assert.ok(swapEntry);assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'));assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))}
-      tokens=mainCalls===1?(slow||fail?95000:79000):tool?81000:1100
+      if(mainCalls=== (slow?2:3)){if(!passive)assert.ok(swapEntry);assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'));assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))}
+      tokens=mainCalls===1?(slow||fail||badSummary?95000:79000):tool?81000:1100
       content=tool?null:'合成测试正常结束。'
     }
     const delta=tool?{role:'assistant',tool_calls:[{index:0,id:'call-'+mainCalls,type:'function',function:{name:'background_checkpoint',arguments:'{}'}}]}:{role:'assistant',content}
     res.writeHead(200,{'content-type':'text/event-stream'})
-    for(const chunk of [{choices:[{index:0,delta,finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:tool?'tool_calls':'stop'}],usage:{prompt_tokens:tokens-100,completion_tokens:100,total_tokens:tokens,prompt_tokens_details:{cached_tokens:branch?256:0}}}])res.write('data: '+JSON.stringify(chunk)+'\n\n')
+    for(const chunk of [{choices:[{index:0,delta,finish_reason:null}]},{choices:[{index:0,delta:{},finish_reason:branch&&truncated?'length':tool?'tool_calls':'stop'}],usage:{prompt_tokens:tokens-100,completion_tokens:100,total_tokens:tokens,prompt_tokens_details:{cached_tokens:branch?256:0}}}])res.write('data: '+JSON.stringify(chunk)+'\n\n')
     res.end('data: [DONE]\n\n')
   })
   await new Promise(resolve => mainServer.listen(0, '127.0.0.1', resolve))
@@ -85,8 +93,9 @@ try {
     model = archive.saveApiModel({ provider: 'openai', model: 'fixture-luna', url: `http://127.0.0.1:${server.address().port}/v1`, effort: 'high' })
   }
   archive.setHarnessSetting('pi', 'api', null, null, null, model.id); archive.setIntegrationEnabled('pi', true)
-  savePiPolicy(archive, { enabled: true, ratio: 0.8, ...(mainFork?{summaryMode:'main-fork'}:{}) })
+  savePiPolicy(archive, { enabled: !passive, ratio: 0.8, ...(mainFork?{summaryMode:'main-fork'}:{}) })
   writeFileSync(join(agentDir, 'extensions/superlcm.ts'), piExtension({ node: process.execPath, script: fileURLToPath(new URL('../src/cli.js', import.meta.url)), home: archive.dir }))
+  if(nativeFault)writeFileSync(join(agentDir,'extensions/00-native-fault.ts'), `export default function(pi){pi.on('before_provider_request',event=>({...event.payload,${nativePayload?"tools:[{type:'function',function:{name:'oversized_tool',description:'中'.repeat(120000),parameters:{type:'object',properties:{}}}}]":"max_tokens:90000"}}))}`)
   const manager = sdk.SessionManager.create(cwd, sessions)
   const usage = tokens => ({ input: tokens - 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
   for (let i = 0; i < 8; i++) {
@@ -107,7 +116,7 @@ try {
   modelRuntime.hasConfiguredAuth = provider => provider === 'fixture-main' || hasAuth(provider)
   const key = 'pi-' + manager.getSessionId()
   const checkpoint = { name: 'background_checkpoint', label: 'fixture checkpoint', description: 'Deterministic test barrier', parameters: { type: 'object', properties: {} }, async execute() {
-    if (mainCalls === 1 && !slow && !fail) {
+    if (mainCalls === 1 && !slow && !fail && !badSummary) {
       const deadline = Date.now() + (mainFork?20000:240000)
       while (Date.now() < deadline) {
         if (archive.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_prepared_compactions'").get() && archive.db.prepare('SELECT 1 FROM pi_prepared_compactions WHERE session=?').get(key)) break
@@ -149,15 +158,22 @@ try {
   await session.bindExtensions({onError:error=>console.error('Fixture extension error:',error.message),uiContext:{notify:text=>console.error('Fixture notice:',text),setStatus:()=>{}}})
   assert.ok(session.getActiveToolNames().includes('lcm_read'))
   await session.prompt('LATE_USER_REQUEST_KEEP_VERBATIM：继续检查，禁止部署。' + (largeInput ? '中'.repeat(120000) : ''))
-  if (fail || cold || huge || largeInput) {
-    assert.equal(swapEntry, undefined); assert.equal(mainCalls, cold || largeInput ? 0 : 1)
+  if(passive){
+    assert.equal(swapEntry,undefined);assert.equal(apiCalls,1);assert.equal(mainCalls,3)
+    const receipt=archive.db.prepare('SELECT * FROM fork_summary_receipts WHERE session=?').get(key)
+    assert.ok(receipt);assert.ok(archive.db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE session=?').get(key).n>0)
+    assert.ok(readFileSync(manager.getSessionFile(),'utf8').startsWith(original))
+    const result={ok:true,mode:'passive-only',installedPi:JSON.parse(readFileSync(join(packageRoot,'package.json'))).version,summaryCalls:apiCalls,mainCalls,contextReplacements:0,fullOriginalPreserved:true,directory:dir}
+    writeFileSync(join(dir,'receipt.json'),JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify(result))
+  } else if (fail || cold || huge || largeInput || nativeFault || badSummary) {
+    assert.equal(swapEntry, undefined); assert.equal(mainCalls, cold || largeInput || nativeFault ? 0 : 1)
     assert.equal(transportCalls, mainFork ? mainCalls + apiCalls : 0, 'unsafe extra main request must never send HTTP')
     if (!mainFork && (fail || huge)) assert.ok(abortedNativeCalls >= 1, 'exercise the real installed native provider with the aborted signal')
     const raw = readFileSync(manager.getSessionFile(), 'utf8')
     assert.ok(raw.startsWith(original)); assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'))
     if (cold || largeInput) assert.ok(raw.includes('superlcm-deferred-input'))
-    else assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))
-    const receipt = { ok: true, mode: largeInput ? 'oversized-input' : huge ? 'unshrinkable-tool-result' : cold ? 'cold-input-failure' : 'tool-boundary-failure', directory: dir, mainCalls, abortedNativeCalls, unsafeProviderRequests: mainFork ? transportCalls-mainCalls-apiCalls : transportCalls, fullOriginalPreserved: true }
+    else if(!nativeFault) assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))
+    const receipt = { ok: true, mode: nativePayload?'oversized-native-payload':nativeOutput?'oversized-native-output':malformed?'malformed-summary':missing?'missing-summary-node':truncated?'truncated-summary':largeInput ? 'oversized-input' : huge ? 'unshrinkable-tool-result' : cold ? 'cold-input-failure' : 'tool-boundary-failure', directory: dir, mainCalls, abortedNativeCalls, unsafeProviderRequests: mainFork ? transportCalls-mainCalls-apiCalls : transportCalls, fullOriginalPreserved: true }
     writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
   } else {
   if(mainFork){

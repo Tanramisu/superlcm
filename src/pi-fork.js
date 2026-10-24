@@ -6,6 +6,8 @@ import { forkHash, forkAnchors, forkDirective, parseForkTree } from './fork-summ
 import {summaryToolPairing} from './summary-source.js'
 import { estimateSummaryTokens } from './summary-tokens.js'
 import { serializePiMessages } from './pi-snapshot.js'
+import { summaryAttempt } from './summary-attempt.js'
+import { estimatePiRequest, piOutputReserve } from './pi-request.js'
 let converter
 async function convert(messages) {
   if (!converter) {
@@ -44,13 +46,13 @@ export async function piForkPlan(snapshot, capture) {
   if(first!==selected.length)throw Error('Pi 选区存在未闭合工具组，保留原文')
   return plan
 }
-export async function summarizePiFork(ctx, snapshot, capture, { signal, stage } = {}) {
+export async function summarizePiFork(ctx, snapshot, capture, { signal, stage, timeoutMs = 180000 } = {}) {
   if (!capture?.payload || capture.model.provider !== ctx.model?.provider || capture.model.id !== ctx.model?.id) throw Error('Pi 尚未捕获当前模型的原始请求')
   const plan = await piForkPlan(snapshot, capture)
   await stage() // Exact originals must be durably archived before model work.
   signal?.throwIfAborted()
   const target = Math.min(20000, Math.max(2048, snapshot.tokensBefore * .15))
-  const nativeReserve=capture.payload.max_tokens??capture.payload.max_completion_tokens??capture.payload.max_output_tokens??capture.model.maxTokens??16384
+  const nativeReserve=piOutputReserve(capture.payload,capture.model)
   const treeOptions={fanout:snapshot.summaryTuning?.fanout||4,targetTokens:Math.max(256,Math.min(target,12000,Math.floor(nativeReserve*.65)))}
   const directive = forkDirective(plan, treeOptions.targetTokens,undefined,treeOptions)
   let images = 0
@@ -60,16 +62,19 @@ export async function summarizePiFork(ctx, snapshot, capture, { signal, stage } 
   const field = Array.isArray(capture.payload.messages) ? 'messages' : Array.isArray(capture.payload.input) ? 'input' : null
   if (!field) throw Error('当前 Pi 供应商没有可原样分支的请求数组')
   let sent = false
-  const result = await ctx.modelRegistry.streamSimple(capture.model, { messages: [...capture.messages, { role: 'user', content: directive, timestamp: Date.now() }] }, {
-    sessionId: snapshot.session_id, reasoning: capture.reasoning, signal: AbortSignal.any([signal, AbortSignal.timeout(180000)].filter(Boolean)),
+  const result = await summaryAttempt(abort => ctx.modelRegistry.streamSimple(capture.model, { messages: [...capture.messages, { role: 'user', content: directive, timestamp: Date.now() }] }, {
+    sessionId: snapshot.session_id, reasoning: capture.reasoning, signal: abort,
     onPayload(payload) {
+      abort.throwIfAborted()
       if (!Array.isArray(payload[field]) || payload[field].at(-1)?.role !== 'user') throw Error('Pi 后台摘要请求格式不兼容')
       sent = true
       // Replay all native settings, tools, cache controls and original wire
       // messages. Only append the provider-converted final user instruction.
-      return { ...structuredClone(capture.payload), [field]: [...structuredClone(capture.payload[field]), payload[field].at(-1)] }
+      const replay = { ...structuredClone(capture.payload), [field]: [...structuredClone(capture.payload[field]), payload[field].at(-1)] }
+      if (Number.isFinite(limit) && estimatePiRequest(replay) >= limit) throw Error('Pi 后台分支最终请求没有足够输入空间，原文保留')
+      return replay
     }
-  }).result()
+  }).result(), signal, timeoutMs)
   signal?.throwIfAborted()
   if (!sent || result.stopReason !== 'stop' || result.content.some(block => block.type === 'toolCall')) throw Error('Pi 后台分支未完整结束，原文保留')
   const tree = parseForkTree(result.content.filter(b => b.type === 'text').map(b => b.text).join('\n'), plan,undefined,treeOptions)
