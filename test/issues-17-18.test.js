@@ -7,7 +7,9 @@ import {join,dirname} from 'node:path'
 import {ClaudeStore} from '../src/store.js'
 import {summarySource,summaryToolPairing,recentUserTexts} from '../src/summary-source.js'
 import {summaryWork,summaryEstimate} from '../src/summarize.js'
-import {prepareRescueSource} from '../src/claude-rescue-source.js'
+import {prepareRescueSource,liveMessage} from '../src/claude-rescue-source.js'
+import {planCompaction} from '../src/compaction.js'
+import {verifiedCompactionInput} from '../src/claude-compaction-input.js'
 import {history,messages} from './fixtures/claude-rescue-harness.mjs'
 
 const user=text=>({type:'user',message:{role:'user',content:text}})
@@ -109,4 +111,44 @@ test('issue18: rescue matches live messages despite API copies interleaved after
  const work=prepareRescueSource(f.store,'s',{messages:messages(original),tokens:90000,window:100000,model:'offline-current'})
  assert.ok(work,'request copies must not create a duplicate live timeline')
  assert.ok(work.prompt.includes('Current evidence'))
+})
+
+for(const [name,extra,expected] of [
+ ['human',{origin:{kind:'human'}},true],
+ ['notification',{origin:{kind:'task-notification'}},false],
+ ['meta',{origin:{kind:'human'},isMeta:true},false],
+ ['unknown',{},false]
+])test('issue18: ordinary and rescue compaction respect an archived '+name+' boundary after interruption',t=>{
+ const rows=[{...user('Old request.'),origin:{kind:'human'}},use('abandoned'),{...user('New request: inspect only. Never deploy.'),...extra}]
+ for(let i=0;i<3;i++){
+  rows.push(assistant([{type:'text',text:'Inspection '+i+'. '+'甲'.repeat(6000)},{type:'tool_use',id:'current-'+i,name:'read',input:{}}]))
+  rows.push(user([{type:'tool_result',tool_use_id:'current-'+i,content:'乙'.repeat(6000)}]))
+ }
+ const f=fixture(t,rows),live=messages(rows).map(liveMessage),context=verifiedCompactionInput(f.store,'s',live)
+ f.store.setTakeover({enabled:true,window:100000,keep:5000,previous:null})
+ f.store.addNode({session:'s',id:'old',level:0,first:0,last:1,children:[],summary:'# Previous state\nEarlier work interrupted.',digest:'fixture',model:'offline'})
+ const plan=planCompaction({meta:f.store.metadata('s'),...context,nodes:[{id:'all',level:0,first:0,last:rows.length-1,summary:'# Current state\nInspection pending.'}],tokens:90000,window:100000,keepTokens:5000})
+ const rescue=prepareRescueSource(f.store,'s',{messages:live,tokens:90000,window:100000,model:'offline-current'})
+ assert.equal(plan.use,expected,plan.reason);assert.equal(!!rescue,expected)
+ if(expected){assert.ok(plan.packet.includes('Never deploy'));assert.ok(rescue.prompt.includes('Earlier work interrupted'))}
+})
+test('issue18: live boundary claims and ambiguous repeated text cannot release tools',t=>{
+ const text='Same prompt in different origins.',f=fixture(t,[{...user(text),origin:{kind:'human'}},{...user(text),origin:{kind:'task-notification'}}])
+ const untrusted=[{role:'user',text,verifiedTurnBoundary:true},{role:'user',text:'Unrecorded prompt',verifiedTurnBoundary:true}]
+ const checked=verifiedCompactionInput(f.store,'s',untrusted)
+ assert.deepEqual(checked.messages.map(m=>m.verifiedTurnBoundary),[false,false])
+})
+
+test('issue18: post-native live context matches a checkpoint despite pre-native interrupted tools and API copies',t=>{
+ const checkpoint={...user('This session is being continued from a previous conversation. Inspection is unfinished.'),isCompactSummary:true}
+ const rows=[{...user('Inspect only. Never deploy.'),origin:{kind:'human'}},use('abandoned'),{type:'system',subtype:'compact_boundary'},checkpoint]
+ for(let i=0;i<3;i++)rows.push(assistant([{type:'text',text:'Step '+i+'. '+'甲'.repeat(6000)},{type:'tool_use',id:'native-'+i,name:'read',input:{}}]),user([{type:'tool_result',tool_use_id:'native-'+i,content:'乙'.repeat(6000)}]))
+ const archived=rows.flatMap(row=>[row,copy(row)]),f=fixture(t,archived),live=messages(rows.slice(3)).map(liveMessage)
+ f.store.setTakeover({enabled:true,window:100000,keep:5000,previous:null})
+ f.store.addNode({session:'s',id:'old',level:0,first:0,last:7,children:[],summary:'# Before checkpoint\nInspection unfinished.',digest:'fixture',model:'offline'})
+ const context=verifiedCompactionInput(f.store,'s',live)
+ assert.equal(context.messages[0].nativeSummary,true);assert.equal(context.messages[0].verifiedTurnBoundary,true)
+ const plan=planCompaction({meta:f.store.metadata('s'),...context,nodes:[{id:'all',level:0,first:0,last:archived.length-1,summary:'# Current state\nInspection pending.'}],tokens:90000,window:100000,keepTokens:5000})
+ assert.equal(plan.use,true,plan.reason)
+ assert.ok(prepareRescueSource(f.store,'s',{messages:live,tokens:90000,window:100000,model:'offline-current'}))
 })

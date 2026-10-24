@@ -23,6 +23,7 @@ function archivedMessages(store,session) {
     const blocks=Array.isArray(content)?content:[],toolBodies=bodies({toolUses:blocks.filter(b=>b.type==='tool_use'),toolResults:blocks.filter(b=>b.type==='tool_result')})
     const message={role,text,toolUses:pairing.opened,toolResultIds:pairing.closed}
     return [{ordinal:e.ordinal,digest:e.digest,key:messageKey(message),native:record.isCompactSummary===true,
+      endsTurn:pairing.endsTurn===true,
       toolBodies:toolBodies.map(body=>Object.fromEntries(Object.entries(body).map(([name,value])=>[name,rescueHash(canonical(value))])))}]
   })
 }
@@ -53,6 +54,9 @@ export function prepareRescueSource(store,session,input) {
   if(candidates.length!==1)return null
   const active=archived.slice(candidates[0],candidates[0]+messages.length)
   if(active.at(-1).ordinal!==archived.at(-1).ordinal)return null
+  // Full sequence and tool-body matching above identify the exact source turn,
+  // even when separate notifications happen to repeat the same prompt text.
+  context.messages=context.messages.map((m,i)=>({...m,verifiedTurnBoundary:active[i].endsTurn}))
   if(active[0].native)context.messages[0].nativeSummary=true
   const window=Math.min(input.window||setting.window,setting.window),tokens=input.tokens
   if(!Number.isFinite(tokens)||tokens<=0||!Number.isFinite(window)||window<1000||messages.length<2||typeof input.model!=='string'||!input.model)return null
@@ -64,7 +68,7 @@ export function prepareRescueSource(store,session,input) {
   const safe=new Set(safeAssistantStarts(context.messages))
   // Ordinary suffixes start at human prompts; a long single turn needs the
   // existing verified request carry plus a tool-complete assistant boundary.
-  if(start===0||messages.slice(start).reduce((s,m)=>s+size(m),0)*tokens/total>window*.3){
+  if(start===0||start===messages.length||messages.slice(start).reduce((s,m)=>s+size(m),0)*tokens/total>window*.3){
     const within=turnTail({messages:context.messages,events,cut:messages.length,tokens,total,size,keepTokens:setting.keep,window})
     if(!within)return null
     start=within.start;request=within.request
@@ -74,7 +78,8 @@ export function prepareRescueSource(store,session,input) {
   }
   if(start<=0||start>=messages.length)return null
   const pending=new Set()
-  for(const m of messages.slice(0,start)){for(const id of m.toolUses)pending.add(id);for(const id of m.toolResultIds)pending.delete(id)}
+  for(const m of context.messages.slice(0,start)){if(m.verifiedTurnBoundary)pending.clear();for(const id of m.toolUses)pending.add(id);for(const id of m.toolResultIds)pending.delete(id)}
+  if(context.messages[start].verifiedTurnBoundary)pending.clear()
   if(pending.size||messages[start].toolResultIds.length||request&&!safe.has(start))return null
   const matched=active.slice(0,start),through=matched.at(-1).ordinal
   const nodes=claudeCompactionNodes(store,session).filter(n=>n.last<=through)
