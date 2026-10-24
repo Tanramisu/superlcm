@@ -538,9 +538,36 @@ export class ClaudeStore {
     const file = realpathSync(path)
     if (!statSync(file).isFile()) throw new Error('Source is not a regular file')
     const prior = this.source(session)
-    if (prior && (prior.path !== file || prior.kind !== kind)) throw new Error('Session already bound to a different source; use a distinct session id')
+    if (prior && (prior.path !== file || prior.kind !== kind)) {
+      if (prior.kind !== kind || !this.#continuesSource(session,prior.offset,file)) throw new Error('Session already bound to a different source; use a distinct session id')
+      this.db.prepare('UPDATE sources SET path=? WHERE session=?').run(file,session)
+    }
     this.db.prepare('INSERT OR IGNORE INTO sources(session,path,kind) VALUES(?,?,?)').run(session, file, kind)
     return file
+  }
+  // Hosts may move a transcript between workspaces. Only follow a move when
+  // every indexed byte still agrees with both the private archive and its digest.
+  // This runs once per path change, under the ingest transaction, never per append.
+  #continuesSource(session,offset,file) {
+    if (offset === 0) return !this.db.prepare('SELECT 1 FROM events WHERE session=? LIMIT 1').get(session)
+    const archive=this.archivePath(session)
+    if (!existsSync(archive)) return false
+    const archived=openSync(archive,'r')
+    try {
+      const source=openSync(file,'r')
+      try {
+        const archiveSize=fstatSync(archived).size,sourceSize=fstatSync(source).size
+        if (archiveSize < offset || sourceSize < offset) return false
+        let through=0
+        for (const row of this.db.prepare('SELECT start,end,digest FROM events WHERE session=? ORDER BY ordinal').iterate(session)) {
+          if (row.start !== through || row.end > offset) return false
+          const a=this.#readRange(archived,row.start,row.end,archiveSize),b=this.#readRange(source,row.start,row.end,sourceSize)
+          if (!a || !b || a.digest !== row.digest || !a.raw.equals(b.raw)) return false
+          through=row.end
+        }
+        return through === offset
+      } finally { closeSync(source) }
+    } finally { closeSync(archived) }
   }
   ingest(session, path, kind = 'jsonl') {
     // Serialize the cursor snapshot, archive copy and indexing across processes.

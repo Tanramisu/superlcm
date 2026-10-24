@@ -1,5 +1,6 @@
 import {userTextFromRecord,excerptUserTexts} from './summary-language.js'
 import { dshRecordCategory } from './dsh-summaries.js'
+import {isRequestCopy} from './claude-records.js'
 // Summarization reads verified originals, never the UI/search preview. Keep
 // message roles, timestamps, tool outcomes and literal whitespace intact.
 const textOf = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value)
@@ -25,6 +26,7 @@ export function summarySource(raw, kind = 'jsonl') {
   let record
   try { record = JSON.parse(raw) } catch { return '' }
   if (!record || typeof record!=='object' || Array.isArray(record)) return ''
+  if (isRequestCopy(record)) return ''
   if (record.dsh_session && record.event) {
     const event=record.event
     if (dshRecordCategory(event)!=='original') return ''
@@ -69,6 +71,7 @@ export function summaryToolPairing(raw, kind='jsonl') {
   if(kind==='text')return {opened,closed}
   let record;try{record=JSON.parse(raw)}catch{return {opened,closed}}
   if(!record||typeof record!=='object')return {opened,closed}
+  if(isRequestCopy(record))return {opened,closed}
   const add=(list,id)=>{if(typeof id==='string'&&id)list.push(id)}
   const content=blocks=>{
     if(typeof blocks==='string'&&blocks.startsWith('\0json:')){try{blocks=JSON.parse(blocks.slice(6))}catch{return}}
@@ -93,6 +96,11 @@ export function summaryToolPairing(raw, kind='jsonl') {
     if(['tool','toolResult'].includes(role))add(closed,m.toolCallId||m.tool_call_id||m.callId)
     let calls=m.tool_calls;try{if(typeof calls==='string')calls=JSON.parse(calls)}catch{calls=[]}
     if(role==='assistant'&&Array.isArray(calls))for(const call of calls)add(opened,call.id)
+    // Only explicit Claude turn boundaries prove that an interrupted call was
+    // abandoned. Notifications, meta prompts and legacy unknown origins do not.
+    if(record.type==='user'&&!opened.length&&!closed.length&&
+      (record.isCompactSummary===true||(!record.isMeta&&record.origin?.kind==='human')))
+      return {opened,closed,endsTurn:true}
   }
   return {opened,closed}
 }
@@ -114,7 +122,7 @@ export function recentUserTexts(store,session) {
   const query=store.db.prepare("SELECT ordinal FROM events WHERE session=? AND ordinal<? AND preview LIKE 'user:%' ORDER BY ordinal DESC LIMIT 128")
   for(;;){
     const rows=query.all(session,before);if(!rows.length)break
-    for(const e of rows){const text=userTextFromRecord(store.exact(session,e.ordinal));if(text)texts.unshift(text);if(texts.length>=24)return texts}
+    for(const e of rows){const raw=store.exact(session,e.ordinal);if(isRequestCopy(raw))continue;const text=userTextFromRecord(raw);if(text)texts.unshift(text);if(texts.length>=24)return texts}
     before=rows.at(-1).ordinal
   }
   return texts
