@@ -92,7 +92,12 @@ button:disabled { cursor: default }
 .row[aria-selected="true"] { background: var(--accent-soft) }
 .row .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .row .meta { font-size: 12px; color: var(--ink3); display: flex; gap: 8px; align-items: center; min-width: 0 }
+.row .meta > span { white-space: nowrap; flex-shrink: 0 }
+.row .meta .updated { min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis }
 .mini { flex: 1; height: 4px; border-radius: 2px; background: var(--raw); overflow: hidden; min-width: 40px; max-width: 90px }
+.row .mini { margin-left: auto }
+.mini.attention { background: var(--bad-soft) }
+.mini.attention i { background: var(--bad) }
 .mini i { display: block; height: 100% ; background: var(--l2) }
 .list-foot { padding: 10px 14px; font-size: 12px; color: var(--ink3); border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center }
 .link { border: 0; background: none; color: var(--accent); padding: 0; font-size: inherit }
@@ -303,7 +308,9 @@ th { font-weight: 500; color: var(--ink3); font-size: 12px }
   .detail-inner { padding: 18px 16px 40px }
   .top { gap: 12px; padding: 0 12px }
   .top .pill, .swatches { display: none }
-  .nav button { padding: 0 8px }
+  .top .spacer { display: none }
+  .nav { min-width: 0; overflow-x: auto; flex: 1 }
+  .nav button { padding: 0 8px; flex: none; white-space: nowrap }
   .tools { grid-template-columns: minmax(0, 1fr) }
   .toolref div { grid-template-columns: 1fr; gap: 2px }
   .lanes { grid-template-columns: 36px minmax(0, 1fr) }
@@ -374,3 +381,5 @@ th { font-weight: 500; color: var(--ink3); font-size: 12px }
 .summary-pill.failed,.summary-pill.lost,.summary-pill.unconfigured { color:var(--red,#b54747) }
 .summary-status { line-height:1.7 }
 .summary-cause { padding:10px 12px 4px; color:var(--ink2); font-size:12px; font-weight:600 }
+
+.takeover-panel{margin-top:24px;border:1px solid var(--line,#ddd);border-radius:14px;padding:18px 22px}.takeover-panel>summary{cursor:pointer;font-weight:650}.tool-compression>.page-inner{padding:24px 0 0;max-width:none}.tc-kv dd .btn.small{padding:3px 8px;font-size:12px}

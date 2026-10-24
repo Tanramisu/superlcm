@@ -20,8 +20,7 @@ export function page(nonce) {
     <a class="brand" href="#conversations" id="brand" title="返回对话列表">${logo}SuperLcm</a>
     <nav class="nav" aria-label="主菜单">
       <button type="button" data-view="conversations">对话</button>
-      <button type="button" data-view="connect">接入</button>
-      <button type="button" data-view="compression">压缩</button>
+      <button type="button" data-view="connect">工具</button>
       <button type="button" data-view="settings">设置</button>
     </nav>
     <div class="spacer"></div>
@@ -46,7 +45,7 @@ export function page(nonce) {
 
   <section class="view page" id="view-connect" hidden>
     <div class="page-inner">
-      <div class="page-h"><h1>接入</h1><p>接入后，该工具的对话会自动存入 SuperLcm，其中的 AI 也可查阅全部已存对话。</p></div>
+      <div class="page-h"><h1>工具</h1><p>统一管理归档、后台摘要与可选压缩接管。主模型后台分支沿用当前会话的模型和账户，一次生成分块与上层摘要。</p></div>
       <div class="tools" id="tools"></div>
       <p class="page-note">导入：接入之前的旧对话，可以从本机记录中挑选导入。只读取你选中的对话，不会调用模型。</p>
     </div>
@@ -54,10 +53,11 @@ export function page(nonce) {
 
   <section class="view page" id="view-compression" hidden>
     <div class="page-inner compression-inner">
-      <div class="page-h"><h1>压缩</h1><p>分别管理 Claude 和 DSH 的压缩方式。后台摘要在接入页面设置。</p></div>
+      <div class="page-h"><h2>可选压缩接管</h2><p>默认约 70% 在后台准备整棵摘要树；支持接管的工具约 80% 替换已完成摘要，保留后来追加的原文。Codex 使用原生压缩，SuperLcm 仅生成后台摘要。</p></div>
       <div class="compression-tabs" role="tablist" aria-label="压缩工具">
         <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true">Claude Code</button>
         <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false">dsh harness</button>
+        <button type="button" id="compression-tab-pi" role="tab" data-compression-tool="pi" aria-controls="compression-pi" aria-selected="false">Pi</button>
       </div>
       <section class="compression-card" id="compression-claude-code" data-compression="claude-code" role="tabpanel" aria-labelledby="compression-tab-claude">
         <div class="compression-card-head"><div><span class="eyebrow">Claude Code</span><h2>Claude 压缩</h2></div><span class="state" id="claudeCompressionOwner" hidden>正在读取…</span></div>
@@ -79,6 +79,11 @@ export function page(nonce) {
         <div class="compression-card-head"><div><span class="eyebrow">dsh harness</span><h2>DSH 压缩</h2></div><span class="state" id="dshCompressionOwner" hidden>正在读取…</span></div>
         <p class="desc">可选择由 SuperLcm 接管。关闭接管时，DSH 使用原生压缩，后台摘要和归档继续独立运行。</p>
         <div id="dshCompressionSettings"><p class="muted">正在读取压缩设置…</p></div>
+      </section>
+      <section class="compression-card" id="compression-pi" data-compression="pi" role="tabpanel" aria-labelledby="compression-tab-pi" hidden>
+        <div class="compression-card-head"><div><span class="eyebrow">Pi</span><h2>Pi 压缩</h2></div><span class="state" id="piCompressionOwner" hidden></span></div>
+        <p class="desc">提前在后台准备摘要，到门槛直接替换，完整原文随时可查。空间不足时暂停模型请求，保护对话。</p>
+        <div id="piCompressionSettings"><p class="muted">正在读取压缩设置…</p></div>
       </section>
     </div>
   </section>
@@ -113,9 +118,9 @@ export function page(nonce) {
       </div>
       <div class="panel" data-sec="summary" hidden>
         <h2>摘要</h2>
-        <p class="desc">每个工具用哪种方式写摘要，在「接入」页它的卡片上选：「对话模型生成」由正在聊天的 AI 顺手写，几乎不多花钱；「本工具后台写」和「自定义 API」在后台单独调用模型，不占用主对话。摘要仅用于导航，原文始终完整保存。</p>
+        <p class="desc">在「工具」页选择摘要方式。默认由主模型后台分支，一次返回按粒度划分的叶子摘要和上层摘要，插件验证后整树保存。原请求前缀保持不变；实际缓存命中以供应商用量回执为准。原文始终完整保存。</p>
         <h3>自定义 API 模型</h3>
-        <p class="desc">在这里添加模型，之后在「接入」页任意工具的卡片上选「自定义 API」就能挑它来写摘要。改了这里，用它的工具一起生效。密钥只存在这台电脑上。</p>
+        <p class="desc">在这里添加模型，之后在「工具」页任意工具的卡片上选「独立 API（高级）」就能挑它来写摘要。改了这里，用它的工具一起生效。密钥只存在这台电脑上。</p>
         <div id="apiModels"></div>
         <h3>粒度</h3>
         <p class="desc">只影响之后新生成的摘要，已有摘要保持不变。</p>
@@ -134,8 +139,6 @@ export function page(nonce) {
           <div><code>lcm_find</code><span>按名称、编号或关键词查找对话，并在摘要与原文中全文搜索。</span></div>
           <div><code>lcm_outline</code><span>逐层展开摘要目录。</span></div>
           <div><code>lcm_read</code><span>按编号读取原文，与原始记录逐字一致。</span></div>
-          <div><code>lcm_summary_task</code><span>领取下一段待写的摘要（仅「对话模型生成」模式可用）。</span></div>
-          <div><code>lcm_summary_submit</code><span>提交摘要，服务器校验原文后保存（同上）。</span></div>
         </div>
       </div>
         </div>
@@ -154,6 +157,7 @@ ${dshGlobalState.toString()}
 ${asset('web-compression.js')}
 ${asset('web-admin.js')}
 ${asset('web-dsh-controls.js')}
+${asset('web-pi-controls.js')}
 ${asset('web-dsh.js')}
 boot();
 </script>

@@ -20,14 +20,16 @@ DSH pressure recovery is fixed in 0.5.28; see [behavior and validation](docs/DSH
 |---|---|---|---|
 | Claude Code | Supported | Native compaction by default; optional SuperLcm takeover | Claude plugin or console |
 | Codex | Supported | Native host compaction | Console: MCP tools and capture hooks |
-| Pi | Supported | Native host compaction | Console: auto-discovered extension |
-| dsh harness | Supported | Native compaction by default; optional SuperLcm takeover | Console: connect globally and choose a summary API |
+| Pi | Supported | Native by default; optional SuperLcm takeover | Console: auto-discovered extension |
+| dsh harness | Supported | Native compaction by default; optional SuperLcm takeover | Console: connect globally; main-model branches by default |
 
-All four connections default to archiving, background summaries and recall, with compaction owned by the host. Claude Code and DSH takeover are separate optional settings, off by default and reset to off when their connections are installed or updated. The default DSH component mounts only the archive and console-settings bridge.
+All four connections use **main-model background branches** by default. The branch inherits the active model and account and returns a complete tree in one response: granular source summaries, parent summaries and a continuation root. Explicit independent API configurations and “off” remain unchanged. In-conversation summary-writing tools have been retired.
 
-The console navigation is **Conversations → Connect → Compaction → Settings**. Choose a summary model on each connection card; adjust granularity in Settings. Source segments default to about 20,000 estimated tokens, with four adjacent summaries per merge. DSH’s SuperLcm plugin shows only **Console settings**, linking directly to the DSH compaction tab. Budget estimation follows Lossless Claw’s language-aware approach and is separate from provider billing; legacy character settings remain valid. See the [design comparison](docs/LOSSLESSCLAW-SUMMARY-REVIEW-20261006.md).
+The console navigation is **Conversations → Tools → Settings**. Each tool card selects the summary method; optional compaction settings expand under Tools. Around 70% of a known context budget, background preparation starts. Pi and DSH can install the prepared root around 80%, retaining recent and newly appended originals. Codex retains native compaction. Claude's optional takeover uses its configured threshold, with preparation ahead of that threshold. Unknown context capacity never triggers a speculative automatic branch.
 
-Start with the [installation package](docs/RELEASE.md), run `superlcm web`, and choose your tool under **Connect**. Claude Code users can also [install the Claude plugin](#install-as-a-claude-plugin) and open `/superlcm:console`. For dsh harness, connect once globally and reload dsh harness; see [dsh harness setup](docs/DSH.md).
+Source granularity defaults to about 20,000 estimated tokens, with four adjacent children per parent. Every level is requested in the same response and atomically saved after source and completeness checks. Cache hits are measured from provider usage, never guaranteed. See [architecture and verification](docs/MAIN-FORK.md).
+
+Start with the [installation package](docs/RELEASE.md), run `superlcm web`, and choose your tool under **Tools**. Claude Code users can also [install the Claude plugin](#install-as-a-claude-plugin) and open `/superlcm:console`. For dsh harness, connect once globally and reload dsh harness; see [dsh harness setup](docs/DSH.md).
 
 ## Move a whole conversation, summaries and all, into another tool
 
@@ -49,7 +51,7 @@ Claude Code's own compaction stops the conversation at the threshold, asks the m
 - **The work in hand keeps its detail.** The newest 40K tokens (adjustable: 20K, 40K, 80K or a custom size) stay word for word. Only older parts become summaries, with exact originals available for later lookup.
 - **Complete originals.** Only the agent's view gets shorter. Every original stays in the archive, numbered, and the agent quotes it back with `lcm_read` when a detail matters.
 - **Summaries by Haiku, inside the conversation.** With "Own tool, in the background" and model `haiku` on the Claude Code card, the plugin calls Haiku through the conversation's own login. No API key, no second Claude Code session, and the expensive main model is not spent on bookkeeping.
-- **One final rescue for missing coverage.** With takeover enabled, if bounded catch-up still cannot provide enough safe coverage or space, the plugin asks the current conversation model once, reusing verified summaries and protecting the exact current request. Completed output survives transient save failures. Failed or ambiguous rescues return to native compaction; subagents remain native. See [behavior and limits](docs/CLAUDE-MAIN-RESCUE.md).
+- **Prepared summaries only at replacement.** Branch mode never starts synchronous rescue generation. Missing safe coverage returns control to native Claude compaction.
 - **Off by default.** Turning takeover off restores your previous compaction setting. Background archiving and summaries can still run separately.
 
 An earlier example from a conversation of about 12,000 records: the older part became 3 summaries of about 8,000 characters (a few thousand tokens), the newest stretch stayed verbatim, and a 300K context came back at roughly 70K, most of it Claude Code's own system prompt and tool definitions.
@@ -140,9 +142,8 @@ Pi session files are append-only and are indexed byte for byte, all branches inc
 | `lcm_find` | Find conversations by `#code`, name or ID, and search summaries and originals |
 | `lcm_outline` | Expand the summary tree one level at a time |
 | `lcm_read` | Read exact original records by number |
-| `lcm_summary_task` / `lcm_summary_submit` | In-conversation summary mode only: claim a segment, submit its summary (verified against the originals) |
 
-Every tool is marked with MCP annotations: the four lookups are read-only, the two summary tools write only SuperLcm's own summaries, and none is destructive or reaches outside this computer, so hosts such as Codex run them without asking each time.
+All four MCP tools are read-only. Summary generation and persistence belong to the background integration, separate from recall.
 
 ## More
 

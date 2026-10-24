@@ -1,6 +1,6 @@
 // A dedicated destination, with independent controls and deep links per tool.
 function compressionSection(tool,updateHash=true) {
-  tool=tool==='dsh'?'dsh':'claude-code';state.compressionTool=tool
+  tool=['dsh','pi'].includes(tool)?tool:'claude-code';state.compressionTool=tool
   for(const button of document.querySelectorAll('[data-compression-tool]')) {
     const selected=button.dataset.compressionTool===tool
     button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1
@@ -11,13 +11,19 @@ function compressionSection(tool,updateHash=true) {
     if(!dshControls.value&&!dshControls.loading)act(loadDshControls)
     else renderDshControls()
   }
+  if(tool==='pi') {
+    if(!piControls.value&&!piControls.loading)act(loadPiControls)
+    else renderPiControls()
+  }
 }
 for(const button of document.querySelectorAll('[data-compression-tool]')) {
   button.onclick=()=>compressionSection(button.dataset.compressionTool)
   button.onkeydown=event=>{
     if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return
     event.preventDefault()
-    const tool=event.key==='Home'?'claude-code':event.key==='End'?'dsh':state.compressionTool==='dsh'?'claude-code':'dsh'
+    const tools=Array.from(document.querySelectorAll('[data-compression-tool]'),b=>b.dataset.compressionTool)
+    const index=tools.indexOf(state.compressionTool),offset=event.key==='ArrowLeft'?-1:1
+    const tool=event.key==='Home'?tools[0]:event.key==='End'?tools.at(-1):tools[(index+offset+tools.length)%tools.length]
     compressionSection(tool);document.querySelector('[data-compression-tool="'+tool+'"]').focus()
   }
 }

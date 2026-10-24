@@ -57,7 +57,7 @@ test('local conversations page by harness and index only a selected identity',fi
  assert.throws(()=>indexLocalConversation(store,'claude-code',selected.key,{env}),/no longer available/)
  assert.throws(()=>indexLocalConversation(store,'codex','../../secrets',{env}),/Invalid/)
  assert.equal(localConversations(store,'claude-code',{env}).conversations[0].name,'Name C')
- store.setGlobalSetting('agent');const {work}=await call(store,'lcm_summary_task',{conversation:saved.session});assert.ok(work);assert.equal((await call(store,'lcm_summary_submit',{conversation:saved.session,batch_id:work.batch_id,summary:'# This indexed conversation contains eight factual decision records.'})).saved,true)
+ store.setGlobalSetting('main-fork');await assert.rejects(call(store,'lcm_summary_task',{conversation:saved.session}),/Unknown tool/);assert.equal(store.summaries(saved.session).total,0)
  assert.equal(store.doctor(saved.session).issues.length,0)
 }))
 test('local scanning does not follow symlink files or directories',{skip:process.platform==='win32'},fixture(({env,dir,store})=>{const root=configFiles('codex',env).transcripts;mkdirSync(root,{recursive:true});const outside=join(dir,'outside');mkdirSync(outside);writeFileSync(join(outside,'secret.jsonl'),'{}\n');symlinkSync(outside,join(root,'link'));symlinkSync(join(outside,'secret.jsonl'),join(root,'secret.jsonl'));assert.equal(localConversations(store,'codex',{env}).total,0)}))
@@ -87,7 +87,7 @@ test('authenticated Web workflow detects, indexes, pages nodes and gates setup',
   const result=await post('/api/index-local',{harness:'codex',key:rows.conversations[0].key}).then(r=>r.json());assert.equal(result.source.conversation_id,'web');assert.equal(result.summary_count,0)
   const list=await fetch(base+'/api/conversations',{headers}).then(r=>r.json());assert.equal(list.total,1);assert.deepEqual(list.groups.map(g=>g.harness),['codex'])
   assert.equal((await fetch(base+'/api/conversations?harness=claude-code',{headers}).then(r=>r.json())).total,0)
-  const detail=await fetch(base+'/api/conversation?session='+result.session,{headers}).then(r=>r.json());assert.equal(detail.summary_count,0);assert.deepEqual(detail.bands,[]);assert.equal(detail.summarizing,false)
+  const detail=await fetch(base+'/api/conversation?session='+result.session,{headers}).then(r=>r.json());assert.equal(detail.summary_count,0);assert.deepEqual(detail.bands,[]);assert.equal(detail.summarizing,false,JSON.stringify(detail))
   const events=await fetch(base+'/api/events?session='+result.session+'&from=0&to=5',{headers}).then(r=>r.json());assert.ok(events.events.length>0)
   const handoff=await fetch(base+'/api/continue?session='+result.session,{headers}).then(r=>r.json());assert.match(handoff.line,/#[0-9a-f]{5}/);assert.match(handoff.packet.content,/No summaries yet/)
   assert.equal((await post('/api/rename',{session:result.session,name:'Renamed'})).status,200);assert.equal(store.metadata(result.session).name,'Renamed')
@@ -95,12 +95,12 @@ test('authenticated Web workflow detects, indexes, pages nodes and gates setup',
   assert.equal((await post('/api/tuning',{target_chars:24000,batch_size:64,fanout:6})).status,200);assert.equal(store.tuning().fanout,6)
   assert.equal((await post('/api/tuning',{target_chars:7,batch_size:64,fanout:6})).status,400)
   assert.equal((await post('/api/summarize',{session:result.session,backend:'api'})).status,400)
-  const scheduled=await post('/api/summarize',{session:result.session,backend:'cli'}).then(r=>r.json())
+  const scheduled=await post('/api/summarize',{session:result.session,backend:'main-fork'}).then(r=>r.json())
   assert.equal(scheduled.started,false);assert.equal(scheduled.queued,true);assert.equal(scheduled.summary_health.state,'starting');assert.equal(scheduled.summary_health.active,true)
-  assert.equal(spawned.length,1);assert.deepEqual(spawned[0][1].slice(1),['summarize',result.session,'--run',scheduled.run_id,'--backend','cli'])
+  assert.equal(spawned.length,1);assert.deepEqual(spawned[0][1].slice(1),['summarize',result.session,'--run',scheduled.run_id,'--backend','main-fork'])
   assert.equal((await fetch(base+'/api/conversation?session='+result.session,{headers}).then(r=>r.json())).backends.includes('api'),false)
   {const r=await post('/api/settings',{scope:'global',mode:'api',model:'gpt-test',api_provider:'openai',api_url:'https://api.example.test/v1/chat/completions',api_key:'k-test-12345'});assert.equal(r.status,200,await r.text())}
-  assert.equal((await post('/api/settings',{scope:'global',mode:'agent'})).status,200)
+  assert.equal((await post('/api/settings',{scope:'global',mode:'main-fork'})).status,200)
   assert.equal(store.apiConfig(result.session),null,'a custom API only counts while a scope is set to it')
   assert.equal((await post('/api/settings',{scope:'global',mode:'api',model:'gpt-test',api_provider:'openai',api_url:'https://api.example.test/v1/chat/completions'})).status,200)
   assert.ok((await fetch(base+'/api/conversation?session='+result.session,{headers}).then(r=>r.json())).backends.includes('api'))
@@ -171,14 +171,14 @@ test('setup prefers a node no AI tool bundles, and replaces an older SuperLcm ho
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('对话模型生成: the per-turn note asks for a piece from memory; after a compaction that piece comes with its text',fixture(({env,store})=>{
+test('Pi reports lifecycle events without assigning summary work to the chatting model',fixture(({env,store})=>{
  env.PI_CODING_AGENT_DIR=join(env.HOME,'pi-agent');const root=configFiles('pi',env).transcripts;mkdirSync(join(root,'--p--'),{recursive:true});const file=join(root,'--p--','s.jsonl')
  const msg=(i)=>({type:'message',id:'m'+i,parentId:i?'m'+(i-1):null,message:{role:i%2?'assistant':'user',content:[{type:'text',text:'point '+i+' about the alpha plan'}]}})
  writeFileSync(file,[{type:'session',id:'mem',version:3},...Array.from({length:10},(_,i)=>msg(i))].map(x=>JSON.stringify(x)).join('\n')+'\n')
- store.setGlobalSetting('agent')
+ store.setGlobalSetting('off')
  const hook=event=>{const r=spawnSync(process.execPath,[script,'pi-hook','--home',store.dir],{env,input:JSON.stringify({hook_event_name:event,session_id:'mem',session_file:file}),encoding:'utf8',timeout:10000});assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout)}
  const reply=hook('before_agent_start')
- assert.match(reply.context,/lcm_summary_task \{"conversation":"pi-mem","recent":true\}/)
+ assert.equal(reply.context,undefined)
  assert.equal(hook('turn_end').context,undefined,'only the turn-start event carries a note')
  const again=new ClaudeStore(store.dir)
  try{

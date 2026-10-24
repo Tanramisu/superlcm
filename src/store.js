@@ -1,3 +1,4 @@
+import { migrateSummaryModes } from './summary-migration.js'
 import { initializeEventCounts } from './event-counts.js'
 import { codexHeadlessRecord, codexHeadlessStatus } from './codex.js'
 import { initializeSummaryRuns, latestSummaryRun, summaryRunHistory, recoverSummaryRuns } from './summary-runs.js'
@@ -148,6 +149,7 @@ export class ClaudeStore {
       for(const x of this.harnessSettings())if(owner[x.mode])this.db.prepare("UPDATE harness_summary_settings SET mode='cli',model=? WHERE harness=?").run(owner[x.mode]===x.harness?x.model:null,x.harness)
       this.db.exec('PRAGMA user_version=1');this.db.exec('COMMIT')
     }
+    migrateSummaryModes(this.db)
     this.backfillHeadless()
   }
   close() { this.db.close() }
@@ -203,21 +205,21 @@ export class ClaudeStore {
     if (status === 'ok' && this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='summary_errors'").get()) this.db.prepare("UPDATE summary_errors SET detail='' WHERE session=?").run(session)
   }
   setSummaryMode(session,mode) {
-    if (!['off','cli','api'].includes(mode) || !this.source(session)) throw new Error('Invalid session summary mode')
+    if (!['off','cli','api','main-fork'].includes(mode) || !this.source(session)) throw new Error('Invalid session summary mode')
     this.db.prepare('INSERT INTO summary_policies(session,mode) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET mode=excluded.mode').run(session,mode)
   }
   summaryMode(session) { return this.db.prepare('SELECT mode FROM summary_policies WHERE session=?').get(session)?.mode || null }
   setPreference(session,mode,model=null) {
-    if (!this.source(session) || !['auto','off','cli','codex-cli','api','agent'].includes(mode) || (model!==null && (typeof model!=='string' || !validModel(model)))) throw new Error('Invalid summary preference')
+    if (!this.source(session) || !['auto','off','cli','codex-cli','api','main-fork'].includes(mode) || (model!==null && (typeof model!=='string' || !validModel(model)))) throw new Error('Invalid summary preference')
     this.db.prepare('INSERT INTO summary_preferences(session,mode,model) VALUES(?,?,?) ON CONFLICT(session) DO UPDATE SET mode=excluded.mode,model=excluded.model').run(session,mode,model)
     return this.preference(session)
   }
   preference(session) {return this.db.prepare('SELECT mode,model FROM summary_preferences WHERE session=?').get(session)||{mode:'auto',model:null}}
   // Legacy conversation preferences remain in SQLite for migration; routing ignores them.
   validateSetting(mode,model,apiProvider=null,apiURL=null) {
-    if (!['off','cli','api','agent'].includes(mode) || (model!==null && (typeof model!=='string' || !(mode==='api'?validApiModel(model):validModel(model))))) throw new Error('Invalid summary setting or model ID')
+    if (!['off','cli','api','main-fork'].includes(mode) || (model!==null && (typeof model!=='string' || !(mode==='api'?validApiModel(model):validModel(model))))) throw new Error('Invalid summary setting or model ID')
     if(mode==='api') {if(!model)throw new Error('Custom API requires an explicit model ID');return {api_provider:apiProvider,api_url:normalizeApiEndpoint(apiProvider,apiURL)}}
-    if (['off','agent'].includes(mode) && model!==null) throw new Error('This summary mode does not use a model')
+    if (['off','main-fork'].includes(mode) && model!==null) throw new Error('This summary mode does not use a model')
     return {api_provider:null,api_url:null}
   }
   // Granularity applies to batches planned from now on; saved nodes keep their original ranges.
@@ -347,9 +349,10 @@ export class ClaudeStore {
     const choice=specific||this.globalSetting()
     const r=choice ? {...choice,scope:specific?'harness':'global',harness} : {mode:summaryMode(env),model:null,api_provider:null,api_url:null,scope:'environment',harness}
     // A model belongs to one tool's CLI, so only a tool's own setting (or the environment) names one.
+    if(r.mode==='agent')r.mode='main-fork'
     if(r.mode==='codex-cli')r.mode='cli'
     if(r.mode==='cli'&&r.scope==='global')r.model=null
-    if(harness==='dsh'&&!['api','off'].includes(r.mode))return {...r,mode:'off',model:null,scope:'needs-api'}
+    if(harness==='dsh'&&!['api','off','main-fork'].includes(r.mode))return {...r,mode:'off',model:null,scope:'needs-api'}
     return r
   }
   apiCredential(session,env=process.env) {
@@ -641,6 +644,8 @@ export class ClaudeStore {
     try {
       const deliveries = this.db.prepare('SELECT id FROM deliveries WHERE source_session=? OR target_session=?').all(session, session).map(x => x.id)
       for (const id of deliveries) { this.db.prepare('DELETE FROM delivery_packets WHERE id=?').run(id); this.db.prepare('DELETE FROM deliveries WHERE id=?').run(id) }
+      if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_compaction_chunks'").get())this.db.prepare('DELETE FROM pi_compaction_chunks WHERE session=?').run(session)
+      if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_prepared_compactions'").get())this.db.prepare('DELETE FROM pi_prepared_compactions WHERE session=?').run(session)
       for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
       this.db.prepare('INSERT INTO deleted_sessions(session,deleted_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET deleted_ms=excluded.deleted_ms').run(session, Date.now())
       this.db.exec('COMMIT')

@@ -7,6 +7,7 @@ import {claudePlugin} from './claude-plugin.js'
 import {applyTakeover} from './takeover.js'
 import {dshSetupPreview} from './dsh-setup.js'
 import {applyDshArchivePlan} from './dsh-summary-setup.js'
+import {readPiPolicy,savePiPolicy} from './pi-compaction-policy.js'
 
 const read=file=>existsSync(file)?readFileSync(file,'utf8'):null
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex')
@@ -69,6 +70,7 @@ export async function applyDisconnect(store,harness,revision,options={}) {
       if(p.plugin?.enabled)await run(findCli('claude',env)||'claude',['plugin','disable',p.plugin.id],commandOptions(env))
     }
     if(harness==='pi') {
+      savePiPolicy(store,{enabled:false,ratio:readPiPolicy(store.dir).ratio})
       if(read(p.piFile)!==p.raws[p.piFile])throw Error('Pi 扩展已变化，未覆盖')
       if(p.raws[p.piFile]!==null)renameSync(p.piFile,join(backup,'superlcm.ts'))
     } else {

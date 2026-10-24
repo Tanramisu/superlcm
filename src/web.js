@@ -30,6 +30,7 @@ import { compressionSnapshot, compressionCapabilities, runtimeVersion } from './
 import { dshCompressionSettings,publicCompressionSettings,saveDshCompression } from './dsh-controls.js'
 import {defaultConsolePort,recordConsoleLocation} from './console-location.js'
 import { refreshConversationNames } from './conversation-names.js'
+import { piCompressionSettings, savePiCompression } from './pi-controls.js'
 export { probeMcp } from './mcp-probe.js'
 
 const nonce = () => randomBytes(18).toString('hex')
@@ -54,7 +55,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('Invalid local Web port')
   const session = url => { const id = url.searchParams.get('session'); if (!id || !store.source(id)||store.metadata(id).harness==='hermes') throw new Error('Unknown conversation'); return id }
   // One-off catch-up methods this computer can actually run for a conversation.
-  const backends = id => store.metadata(id).harness==='hermes'?[]:[...(writerTool(store.metadata(id).harness, env) ? ['cli'] : []), ...(store.apiConfig(id, env) ? ['api'] : [])]
+  const backends = id => store.metadata(id).harness==='hermes'?[]:[...(store.effectiveSetting(id,env).mode==='cli'?['cli']:['claude-code','codex'].includes(store.metadata(id).harness)?['main-fork']:[]), ...(store.apiConfig(id, env) ? ['api'] : [])]
   const previews=new Map()
   const bulkSourceRevision=id=>{
     const source=store.source(id),stats=store.stats(id),estimate=summaryEstimate(store,id)
@@ -93,7 +94,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     },
     'POST /api/summarize-bulk-preview': async req => {
       const x=await body(req)
-      if(!['attention','headless'].includes(x.view)||!['cli','api'].includes(x.backend))throw Error('Invalid bulk summary scope')
+      if(!['attention','headless'].includes(x.view)||!['main-fork','cli','api'].includes(x.backend))throw Error('Invalid bulk summary scope')
       if(x.harness!==undefined&&!definitions.some(h=>h.id===x.harness))throw Error('Invalid harness filter')
       if(x.sessions!==undefined&&(!Array.isArray(x.sessions)||x.sessions.length>100||x.sessions.some(id=>typeof id!=='string')||new Set(x.sessions).size!==x.sessions.length))throw Error('Bulk sessions must be a unique list of at most 100 IDs')
       const candidates=listView(x.view,x.harness),allowed=new Set(candidates.map(r=>r.session))
@@ -118,6 +119,8 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'GET /api/connections': () => ({ connections: definitions.map(h => ({ harness: h.id, evidence: connectionEvidence(store, h.id) })) }),
     'GET /api/harnesses': async () => ({ version:runtimeVersion,features:{dsh_setup:true,dsh_global_setup:true,dsh_compression_controls:true},harnesses: (await discovery(store, { env })).filter(x=>x.harness!=='hermes') }),
     'GET /api/compression': () => ({ capabilities: compressionCapabilities, ...compressionSnapshot(store) }),
+    'GET /api/pi-compression': () => piCompressionSettings(store),
+    'POST /api/pi-compression': async req => savePiCompression(store, await body(req)),
     'GET /api/dsh-compression': async()=>publicCompressionSettings(await dshCompressionSettings(store,{env})),
     'POST /api/dsh-compression': async req=>saveDshCompression(store,await body(req),{env}),
     // Claude card: install / update the SuperLcm plugin, or clean up the older MCP + hooks connection.
@@ -176,6 +179,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'POST /api/settings': async req => {
       const x = await body(req)
       if (x.scope !== 'global' && x.scope !== 'harness') throw new Error('Invalid settings scope')
+      if(x.mode==='agent')throw Error('请选择主模型后台分支')
       if (x.scope==='harness'&&x.harness==='hermes')throw new Error('Unsupported tool')
       if (x.scope === 'harness' && !definitions.some(d => d.id === x.harness) && !store.harnessSetting(x.harness)) throw new Error('Unknown tool')
       if(x.harness==='dsh'&&['cli','agent','codex-cli'].includes(x.mode))throw Error('dsh harness 后台摘要请选择自定义 API')

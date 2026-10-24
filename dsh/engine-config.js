@@ -7,8 +7,9 @@ const DEPRECATED_CONFIG_KEYS = new Set(['cacheTtlSeconds', 'thresholdRatio', 're
 const FALLBACK_CONFIG_KEYS = new Set(['fallbackSummarizationProvider', 'fallbackSummarizationModel'])
 
 const ROLLING_CONFIG_KEYS = new Set([
-  'budgetMode','prepareRatio','switchRatio','emergencyRatio',
+  'summaryMode','budgetMode','prepareRatio','switchRatio','emergencyRatio',
   'archiveHome',
+  'databasePath',
   'controlFile',
   'summaryAdapter',
   'runtimeTuning',
@@ -72,7 +73,7 @@ function normalizeRolling(config) {
     : softActiveTokens + 1
 
   return {
-    mode,
+    mode, summaryMode: raw.summaryMode === 'main-fork' ? 'main-fork' : 'api',
     budgetMode:raw.budgetMode??(raw.softActiveTokens!==undefined||raw.hardActiveTokens!==undefined?'tokens':'ratio'),
     ...ratioOptions(raw),
     tailCount: positiveInteger(raw.tailCount, ROLLING_DEFAULTS.tailCount),

@@ -1,10 +1,10 @@
 // Connect view (setup + local import), status pill, settings, appearance and boot().
 const WRITERS = [
-  ['agent', t('对话模型生成'), t('正在聊天的 AI 凭记忆顺手写，几乎不多花钱')],
-  ['cli', t('本工具后台写'), t('另起一个该工具的进程来写，用它已配置的模型，不占用正在聊的对话')],
-  ['api', t('自定义 API'), t('后台单独写 · 使用你的 API 密钥')],
+  ['main-fork', t('主模型后台分支'), t('沿用当前对话模型，在后台一次生成分块摘要')],
+  ['api', t('独立摘要模型（高级）'), t('使用已保存的 API 模型')],
   ['off', t('关闭（摘要方式）'), t('不生成摘要，原文照常保存')]
 ]
+
 const writerLabel = mode => WRITERS.find(w => w[0] === mode)?.[1] || mode
 const kfmt=n=>Math.round(n/1000)+'K'
 const admin = { settings: null, catalog: {}, modelEdit: null, compression: { runtimes: [], jobs: [] }, outdated: false }
@@ -63,8 +63,9 @@ function renderTools() {
     const rows = [[t('状态'), esc(s.text)], [t('已存对话'), count ? t('{n} 个', { n: fmt(count) }) : '<span class="muted">' + t('暂无') + '</span>']]
     rows.push(...writerRows(h))
     if (h.claude) rows.push(...claudeRows(h))
-    const takeover=h.harness==='claude-code'?admin.settings?.takeover.enabled:h.harness==='dsh'&&h.dsh?.profiles.some(p=>p.enabled&&!p.archive_only)
-    rows.push([t('上下文压缩'),'<span class="muted">'+(takeover?t('SuperLcm 接管已开启'):t('由 {tool} 自身负责',{tool:toolName(h.harness)}))+'</span>'])
+    const takeover=h.harness==='claude-code'?admin.settings?.takeover.enabled:h.harness==='pi'?h.compaction_policy?.enabled:h.harness==='dsh'&&h.dsh?.profiles.some(p=>p.enabled&&!p.archive_only)
+    rows.push([t('上下文压缩'),'<span class="muted">'+(takeover?t('SuperLcm 接管已开启'):t('由 {tool} 自身负责',{tool:toolName(h.harness)}))+'</span>'+(['claude-code','pi','dsh'].includes(h.harness)?' <button type="button" class="btn small" data-goto-compact="'+h.harness+'">'+t('设置接管')+'</button>':'')])
+    if((admin.settings?.settings.find(x=>x.harness===h.harness)?.mode||admin.settings?.global?.mode)==='main-fork')rows.push([t('后台准备'),'<span class="muted">'+t('约 70% 时一次生成分块与上层摘要；缓存以实际回执为准')+'</span>'])
     return '<article class="tcard' + (h.detected ? '' : ' dim') + '"><header class="tc-h">' + mark(h.harness, 'lg') + '<div class="tc-name"><div class="tn">' + esc(toolName(h.harness)) + '</div>' + (h.detected ? '' : '<div class="tv">' + t('本机未检测到') + '</div>') + '</div><span class="state ' + s.cls + '">' + esc(s.badge) + '</span></header>' +
       '<dl class="tc-kv">' + rows.map(([k, v]) => '<div><dt>' + k + '</dt><dd>' + v + '</dd></div>').join('') + '</dl>' +
       (buttons ? '<footer class="tc-f">' + buttons + '</footer>' : '') + '</article>'
@@ -72,7 +73,7 @@ function renderTools() {
   for (const b of $('#tools').querySelectorAll('[data-manage]')) b.onclick = () => openConnectionManager(b.dataset.manage)
   for (const b of $('#tools').querySelectorAll('[data-import]')) b.onclick = () => openImport(b.dataset.import)
   for (const b of $('#tools').querySelectorAll('[data-plugin]')) b.onclick = () => pluginAct(b.dataset.plugin, b)
-  for (const b of $('#tools').querySelectorAll('[data-goto-compact]')) b.onclick = () => show('compression/claude-code')
+  for (const b of $('#tools').querySelectorAll('[data-goto-compact]')) b.onclick = () => show('compression/'+b.dataset.gotoCompact)
   for (const select of $('#tools').querySelectorAll('select[data-tool]')) select.onchange = () => {
     const harness = select.dataset.tool, x = admin.settings.settings.find(y => y.harness === harness), models = admin.settings.api_models
     // Custom API picks one of the models added in Settings; with none yet, go add one first.
@@ -304,9 +305,10 @@ function writerRows(h) {
   if (!s) return []
   const x = s.settings.find(y => y.harness === h.harness)
   if (!h.supported && !h.detected && !x) return []
-  const savedMode=x?x.mode:s.global.mode,mode=h.harness==='dsh'&&!['api','off'].includes(savedMode)?'off':savedMode,rows=[]
-  const writers=h.harness==='dsh'?WRITERS.filter(w=>['api','off'].includes(w[0])):WRITERS
+  const savedMode=x?x.mode:s.global.mode,mode=savedMode==='agent'?'main-fork':savedMode,rows=[]
+  const writers=mode==='cli'?[['cli',t('兼容模式：旧版后台写')],...WRITERS]:WRITERS
   rows.push([t('摘要生成'), '<select aria-label="' + t('摘要生成') + '" data-tool="' + esc(h.harness) + '">' + writers.map(([id, label]) => '<option value="' + id + '"' + (mode === id ? ' selected' : '') + '>' + label + '</option>').join('') + '</select>'])
+  if (mode === 'main-fork') rows.push([t('模型'), '<span>'+t('跟随当前对话模型与账号')+'</span>'])
   if (mode === 'cli' && h.bin) rows.push([t('模型'), '<select aria-label="' + t('模型') + '" data-model="' + esc(h.harness) + '"><option value="' + esc(x?.model || '') + '">' + esc(x?.model || t('跟随 {tool} 当前模型', { tool: toolName(h.harness) })) + '</option></select>'])
   if (mode === 'cli' && h.harness === 'claude-code' && h.claude?.plugin?.enabled) rows.push(['', '<span class="muted">' + t('Claude Code 2.1.286+ 在对话里直接调用这个模型，不另开会话；对话结束后剩下的交给后台命令行补完') + '</span>'])
   if (mode === 'api') {

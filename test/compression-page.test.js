@@ -51,13 +51,13 @@ test('DSH optional takeover changes only compaction and reconnect restores origi
   }
 })
 test('off saves without a summary route; on rejects missing route without touching files',async t=>{
-  const {store,env}=await fixture(t,false),initial=await dshCompressionSettings(store,{env})
+  const {store,env}=await fixture(t,false);store.setHarnessSetting('dsh','api','fixture','openai','https://example.test/v1/chat/completions');const initial=await dshCompressionSettings(store,{env})
   const saved=await saveDshCompression(store,{...initial,enabled:false,minRetainTokens:40000},{env})
   assert.equal(readControls(controlsPath(store)).config.minRetainTokens,40000)
   const before=(await dshConfiguration({env})).profiles.map(p=>p.patch),raw=readFileSync(controlsPath(store),'utf8')
   await assert.rejects(saveDshCompression(store,{...saved,enabled:true},{env}),/模型/)
   assert.deepEqual((await dshConfiguration({env})).profiles.map(p=>p.patch),before);assert.equal(readFileSync(controlsPath(store),'utf8'),raw)
-  assert.doesNotThrow(()=>controlsConfig({auto:false}));assert.throws(()=>controlsConfig({auto:true}),/模型/)
+  assert.doesNotThrow(()=>controlsConfig({auto:false}));assert.doesNotThrow(()=>controlsConfig({auto:true,summaryMode:'main-fork'}));assert.throws(()=>controlsConfig({auto:true,summaryMode:'api'}),/模型/)
 })
 test('console links use the recorded port or explicit public address, never DSH credentials',()=>{
   const store={dir:mkdtempSync(join(tmpdir(),'slcm-console-link-'))}
@@ -68,7 +68,7 @@ test('console links use the recorded port or explicit public address, never DSH 
   assert.match(source('dsh/ui/client.js'),/target.search=''/)
 })
 test('dedicated navigation, accessible tabs and DSH deep links select independent panels',()=>{
-  const html=page('fixture');assert.ok(html.indexOf('data-view="connect"')<html.indexOf('data-view="compression"'));assert.ok(html.indexOf('data-view="compression"')<html.indexOf('data-view="settings"'))
+  const html=page('fixture');assert.match(html,/data-view="connect">工具/);assert.doesNotMatch(html,/data-view="compression"/);assert.match(source('src/web-client.js'),/takeoverPanel/);
   assert.ok(!html.includes('data-sec="compact"'))
   const buttons=['claude-code','dsh'].map(tool=>({dataset:{compressionTool:tool},setAttribute(k,v){this[k]=v},focus(){this.focused=true}}))
   const panels=['claude-code','dsh'].map(tool=>({dataset:{compression:tool},hidden:false}))
