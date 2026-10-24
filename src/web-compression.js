@@ -19,10 +19,10 @@ function compressionSection(tool,updateHash=true) {
 for(const button of document.querySelectorAll('[data-compression-tool]')) {
   button.onclick=()=>compressionSection(button.dataset.compressionTool)
   button.onkeydown=event=>{
-    if(!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End'].includes(event.key))return
+    if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return
     event.preventDefault()
     const tools=Array.from(document.querySelectorAll('[data-compression-tool]'),b=>b.dataset.compressionTool)
-    const index=tools.indexOf(state.compressionTool),offset=['ArrowUp','ArrowLeft'].includes(event.key)?-1:1
+    const index=tools.indexOf(state.compressionTool),offset=event.key==='ArrowLeft'?-1:1
     const tool=event.key==='Home'?tools[0]:event.key==='End'?tools.at(-1):tools[(index+offset+tools.length)%tools.length]
     compressionSection(tool);document.querySelector('[data-compression-tool="'+tool+'"]').focus()
   }

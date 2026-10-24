@@ -76,10 +76,10 @@ test('dedicated navigation, accessible tabs and DSH deep links select independen
   runInNewContext(source('src/web-compression.js')+'\ncompressionSection("dsh")',context)
   assert.equal(context.hash,'#compression/dsh');assert.equal(panels[0].hidden,true);assert.equal(panels[1].hidden,false);assert.equal(buttons[1]['aria-selected'],'true');assert.equal(context.loaded,true)
   buttons[1].onkeydown({key:'Home',preventDefault(){}});assert.equal(panels[0].hidden,false);assert.equal(buttons[0].focused,true)
-  assert.match(html,/aria-orientation="vertical"/)
-  buttons[0].onkeydown({key:'ArrowDown',preventDefault(){}});assert.equal(panels[1].hidden,false);assert.equal(buttons[1].focused,true)
-  buttons[1].onkeydown({key:'ArrowUp',preventDefault(){}});assert.equal(panels[0].hidden,false)
-  buttons[0].onkeydown({key:'ArrowUp',preventDefault(){}});assert.equal(panels[1].hidden,false)
+  assert.match(html,/aria-orientation="horizontal"/)
+  buttons[0].onkeydown({key:'ArrowRight',preventDefault(){}});assert.equal(panels[1].hidden,false);assert.equal(buttons[1].focused,true)
+  buttons[1].onkeydown({key:'ArrowLeft',preventDefault(){}});assert.equal(panels[0].hidden,false)
+  buttons[0].onkeydown({key:'ArrowLeft',preventDefault(){}});assert.equal(panels[1].hidden,false)
 })
 
 test('failed official CLI validation rolls back the opt-in graph and leaves saved controls unchanged',async t=>{

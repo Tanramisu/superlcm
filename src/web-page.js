@@ -56,10 +56,10 @@ export function page(nonce) {
     <div class="page-inner compression-inner">
       <div class="page-h"><h1>压缩</h1><p>默认约 70% 在后台准备整棵摘要树；支持接管的工具约 80% 替换已完成摘要，保留后来追加的原文。Codex 使用原生压缩，SuperLcm 仅生成后台摘要。</p></div>
       <div class="compression-layout">
-      <div class="compression-tabs" role="tablist" aria-label="压缩工具" aria-orientation="vertical">
-        <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true"><span class="compression-marker" aria-hidden="true"></span><span class="hmark" aria-hidden="true">${icons['claude-code']}</span><span>Claude Code</span></button>
-        <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false"><span class="compression-marker" aria-hidden="true"></span><span class="hmark" aria-hidden="true">${icons['dsh']}</span><span>dsh harness</span></button>
-        <button type="button" id="compression-tab-pi" role="tab" data-compression-tool="pi" aria-controls="compression-pi" aria-selected="false"><span class="compression-marker" aria-hidden="true"></span><span class="hmark" aria-hidden="true">${icons['pi']}</span><span>Pi</span></button>
+      <div class="compression-tabs" role="tablist" aria-label="压缩工具" aria-orientation="horizontal">
+        <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true"><span class="hmark" aria-hidden="true">${icons['claude-code']}</span><span>Claude Code</span></button>
+        <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false"><span class="hmark" aria-hidden="true">${icons['dsh']}</span><span>dsh harness</span></button>
+        <button type="button" id="compression-tab-pi" role="tab" data-compression-tool="pi" aria-controls="compression-pi" aria-selected="false"><span class="hmark" aria-hidden="true">${icons['pi']}</span><span>Pi</span></button>
       </div>
       <div class="compression-content">
       <section class="compression-card" id="compression-claude-code" data-compression="claude-code" role="tabpanel" aria-labelledby="compression-tab-claude">
