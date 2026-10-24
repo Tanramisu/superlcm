@@ -2,11 +2,11 @@
 
 <h1 align="center">SuperLcm</h1>
 
-<p align="center"><b>五种载体，一座本地对话档案馆。</b><br>原文完整保存，摘要分层整理，换个载体继续任务。</p>
+<p align="center"><b>四种载体，一座本地对话档案馆。</b><br>原文完整保存，摘要分层整理，换个载体继续任务。</p>
 
 <p align="center"><a href="README.md">English</a> · <b>中文</b></p>
 
-SuperLcm 让 **Claude Code、Codex、Hermes、Pi 和 dsh harness** 共用一座存放在你电脑上的对话档案馆。原始记录完整保留，分层摘要帮助你快速找到要紧的部分。换个工具时，一句话就能接续任务；早先的细节随时按编号查原文。
+SuperLcm 让 **Claude Code、Codex、Pi 和 dsh harness** 共用一座存放在你电脑上的对话档案馆。原始记录完整保留，分层摘要帮助你快速找到要紧的部分。换个工具时，一句话就能接续任务；早先的细节随时按编号查原文。
 
 
 0.5.28 修复 DSH 已完成摘要无法提交导致的反复等待，详见[行为与验证范围](docs/DSH-PRESSURE-RECOVERY-0.5.28.md)。
@@ -15,17 +15,16 @@ SuperLcm 让 **Claude Code、Codex、Hermes、Pi 和 dsh harness** 共用一座�
 
 0.5.27 整理了后台摘要排队、重试状态和错误提示，并修复合格摘要被长度检查误拒的问题。详见[修复与验证范围](docs/SUMMARY-JOBS-0.5.27.md)。
 
-## 五种载体，一座档案馆
+## 四种载体，一座档案馆
 
 | 载体 | 原文存档、分层摘要、跨载体接续 | 压缩接入 | 怎么接入 |
 |---|---|---|---|
 | Claude Code | 支持 | 默认工具自身压缩；SuperLcm 接管可选 | Claude 插件或控制台 |
 | Codex | 支持 | 工具自身压缩 | 控制台：查档工具和记录钩子 |
-| Hermes | 支持 | 工具自身压缩 | 控制台：通过 Hermes 自身配置接入 |
 | Pi | 支持 | 工具自身压缩 | 控制台：自动加载的扩展 |
 | dsh harness | 支持 | 默认工具自身压缩；SuperLcm 接管可选 | 控制台：全局接入，卡片上选择摘要模型接口 |
 
-五种载体默认都接入归档、后台摘要和查询，当前上下文由各工具自身压缩。后台摘要进入共享档案，供需要时查阅。Claude Code 与 dsh harness 的接管开关分别放在独立「压缩」页，默认关闭；安装或更新接入也恢复为关闭。DSH 默认组件只运行归档和后台设置入口。
+四种载体默认都接入归档、后台摘要和查询，当前上下文由各工具自身压缩。后台摘要进入共享档案，供需要时查阅。Claude Code 与 dsh harness 的接管开关分别放在独立「压缩」页，默认关闭；安装或更新接入也恢复为关闭。DSH 默认组件只运行归档和后台设置入口。
 
 控制台导航为 **对话 → 接入 → 压缩 → 设置**。摘要模型在接入卡片选择，粒度在设置页调整；默认每段原文目标约 20,000 个估算 token（模型计量文字长度的单位），至少四段且内容量足够时合并为更高层摘要。DSH 插件内只显示「后台设置」，点击直接进入后台的 DSH 压缩页。粒度借鉴 Lossless Claw，按中英文和符号权重估算，与供应商实际计费量分开；已有字符设置保留。详见 [设计对照](docs/LOSSLESSCLAW-SUMMARY-REVIEW-20261006.md)。
 
@@ -40,7 +39,7 @@ SuperLcm 让 **Claude Code、Codex、Hermes、Pi 和 dsh harness** 共用一座�
 - **停在哪，就从哪接着干。** 额度用完、被限速，或者想让另一个模型看看，到另一个工具里说一句 `通过 SuperLcm 接续对话 #6e94e`，任务就接着往下走。
 - **不用复述，不用整段粘贴。** `lcm_continue` 交过去的是分层目录加最近几条原文，新的 AI 一开局上下文就小而准，不是把整份聊天记录硬塞进去。
 - **每个细节随时一查就有。** 整段对话都在档案馆里。早先的某个决定要紧时，新的 AI 用 `lcm_read` 按编号把那条原文一字不差地读出来。
-- **任意方向，来回都行。** Claude Code、Codex、Hermes、Pi、dsh harness 读写的是同一座档案馆，接着干的内容也会存进去，以后可以用同样的办法再交还回去。
+- **任意方向，来回都行。** Claude Code、Codex、Pi、dsh harness 读写的是同一座档案馆，接着干的内容也会存进去，以后可以用同样的办法再交还回去。
 
 ## Claude Code 的可选压缩接管
 
@@ -117,7 +116,7 @@ DSH 已有会话也可在后台「接入 → dsh harness → 导入历史对话�
     /plugin marketplace add yu381792/superlcm
     /plugin install superlcm@superlcm
 
-插件自带上面列出的全部功能；要用接管压缩，打开控制台在「压缩 → Claude Code」打开开关。`/superlcm:console` 打开控制台，在那里把 Codex、Hermes、Pi、dsh harness 接进同一座档案馆。能用的地方是 Claude 能启动本机程序的地方：Claude Code，以及在你自己电脑上运行的 Cowork；claude.ai 网页版和手机聊天用不了。需要 PATH 里有 Node.js 22.16 或更新版本；如果默认的 `node` 太旧，而电脑上装有更新的版本，会自动换用新的。
+插件自带上面列出的全部功能；要用接管压缩，打开控制台在「压缩 → Claude Code」打开开关。`/superlcm:console` 打开控制台，在那里把 Codex、Pi、dsh harness 接进同一座档案馆。能用的地方是 Claude 能启动本机程序的地方：Claude Code，以及在你自己电脑上运行的 Cowork；claude.ai 网页版和手机聊天用不了。需要 PATH 里有 Node.js 22.16 或更新版本；如果默认的 `node` 太旧，而电脑上装有更新的版本，会自动换用新的。
 
 插件更新会替换插件文件夹，所以从插件控制台接入的其他工具会连到 SuperLcm 文件夹里一个固定的入口文件（`~/.superlcm-claude/superlcm.js`），它会跟着插件更新走。如果之前已经从控制台接入过 Claude Code，启用插件后设置里的旧钩子会自动静默；控制台的 Claude 卡片可以一键清掉旧钩子和旧的 `superlcm` MCP 条目（先备份）。安装和更新插件也在这张卡片上。
 
@@ -131,7 +130,7 @@ DSH 已有会话也可在后台「接入 → dsh harness → 导入历史对话�
 
 [MIT](LICENSE)，版权所有 2026 ygc381792 及贡献者。可以自由使用、修改和再发布（包括商用），保留版权声明即可。本项目由个人维护、刻意保持精简：欢迎提 [issue](https://github.com/yu381792/superlcm/issues) 反馈问题和需求，但不保证每条都采纳，一般不合并代码请求（PR）。
 
-Claude、Claude Code、Codex、Hermes、Pi 的名称和标志归各自所有者，这里只用来说明兼容的工具；SuperLcm 是独立项目，与它们没有隶属或背书关系。
+Claude、Claude Code、Codex、Pi 的名称和标志归各自所有者，这里只用来说明兼容的工具；SuperLcm 是独立项目，与它们没有隶属或背书关系。
 
 摘要语言和指令隔离修复见 [新版说明](docs/SUMMARY-QUALITY-0.5.24.md)。
 

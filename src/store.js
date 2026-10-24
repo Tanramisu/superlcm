@@ -103,6 +103,8 @@ export class ClaudeStore {
     initializeEventCounts(this.db)
     initializeSummaryRuns(this.db)
     const hostColumns=new Set(this.db.prepare('PRAGMA table_info(host_summary_claims)').all().map(c=>c.name))
+    // Retire old registrations without deleting their archives or settings.
+    this.db.prepare("INSERT INTO integrations(harness,enabled,revision) VALUES('hermes',0,1) ON CONFLICT(harness) DO UPDATE SET enabled=0,revision=integrations.revision+1 WHERE integrations.enabled<>0").run()
     for(const [column,type] of [['claim_id',"TEXT NOT NULL DEFAULT ''"],['leaf_only','INTEGER NOT NULL DEFAULT 0'],['deadline_ms','INTEGER NOT NULL DEFAULT 0'],['run_id','TEXT']])if(!hostColumns.has(column))this.db.exec(`ALTER TABLE host_summary_claims ADD COLUMN ${column} ${type}`)
     const deliveryColumns=new Set(this.db.prepare('PRAGMA table_info(deliveries)').all().map(c=>c.name))
     if(!new Set(this.db.prepare('PRAGMA table_info(leases)').all().map(c=>c.name)).has('owner'))this.db.exec("ALTER TABLE leases ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
@@ -303,8 +305,9 @@ export class ClaudeStore {
   }
   deleteApiModel(id) {
     if(!this.apiModel(id))throw new Error('Unknown API model')
-    const users=this.db.prepare('SELECT harness FROM harness_summary_settings WHERE api_ref=?').all(id).map(x=>x.harness)
+    const users=this.db.prepare("SELECT harness FROM harness_summary_settings WHERE api_ref=? AND harness<>'hermes'").all(id).map(x=>x.harness)
     if(users.length)throw new Error('Still used by '+users.join(', ')+'; pick another method for it first')
+    this.db.prepare("UPDATE harness_summary_settings SET api_ref=NULL WHERE harness='hermes' AND api_ref=?").run(id)
     this.db.prepare('DELETE FROM api_models WHERE id=?').run(id);removeApiKey(this.dir,'model:'+id)
     return true
   }
@@ -314,6 +317,7 @@ export class ClaudeStore {
     return this.globalSetting()
   }
   setHarnessSetting(harness,mode,model=null,apiProvider=null,apiURL=null,apiRef=null) {
+    if(harness==='hermes')throw Error('Unsupported harness')
     this.harnessSetting(harness)
     if(apiRef!==null){const m=this.apiModel(apiRef);if(mode!=='api'||!m)throw new Error('Unknown API model');[model,apiProvider,apiURL]=[m.model,m.provider,m.url]}
     const api=this.validateSetting(mode,model,apiProvider,apiURL)
@@ -324,8 +328,9 @@ export class ClaudeStore {
   harnessKeyScope(harness,setting=this.harnessSetting(harness)) {return setting?.api_ref?'model:'+setting.api_ref:'harness:'+harness}
   clearHarnessSetting(harness) {this.harnessSetting(harness);this.db.prepare('DELETE FROM harness_summary_settings WHERE harness=?').run(harness);return null}
   harnessSettings() {return this.db.prepare(ClaudeStore.SETTING+' ORDER BY h.harness').all()}
-  integrationEnabled(harness) { return this.db.prepare('SELECT enabled FROM integrations WHERE harness=?').get(harness)?.enabled !== 0 }
+  integrationEnabled(harness) { return harness!=='hermes' && this.db.prepare('SELECT enabled FROM integrations WHERE harness=?').get(harness)?.enabled !== 0 }
   setIntegrationEnabled(harness, enabled) {
+    if(harness==='hermes'&&enabled)throw Error('Unsupported harness')
     this.db.prepare('INSERT INTO integrations VALUES(?,?,1) ON CONFLICT(harness) DO UPDATE SET enabled=excluded.enabled,revision=integrations.revision+1').run(harness,enabled?1:0)
     if(!enabled) {
       this.db.prepare('UPDATE host_writers SET until_ms=0 WHERE session IN (SELECT session FROM session_origins WHERE harness=?)').run(harness)
@@ -358,6 +363,7 @@ export class ClaudeStore {
   apiConfig(session,env=process.env) {
     if(!this.source(session))throw new Error('Unknown session')
     const harness=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness||'legacy'
+    if(harness==='hermes')return null
     const own=harness!=='legacy'?this.harnessSetting(harness):null
     for (const [scope,choice] of [[this.harnessKeyScope(harness,own),own],['global',this.globalSetting()]]) {
       if (choice?.mode!=='api') continue
@@ -409,11 +415,11 @@ export class ClaudeStore {
     return {session,headless:Boolean(row?.headless),...(legacyDshSource(this.db,session)?{historical_archive:legacyDshSource(this.db,session)}:{}),code:shortCode(session),harness:row?.harness||'legacy',conversation_id:row?.external_id||session,name:row?.display_name||derivedName(first)||session,name_source:row?.name_source||(first?'derived':'id')}
   }
   sources() { return this.listSessions(2147483647,0).sessions }
-  listSessions(limit=20,offset=0,harness,view='all') {
+  listSessions(limit=20,offset=0,harness,view='all',excludeRetired=false) {
     this.backfillHeadless()
     if(!['all','attention','headless'].includes(view))throw Error('Invalid conversation view')
     const scope=view==='headless'?"COALESCE(o.headless,0)=1":view==='attention'?"COALESCE(o.headless,0)=0 AND s.status IN ('summary_error','summary_unconfigured') AND NOT EXISTS(SELECT 1 FROM summary_runs r WHERE r.session=s.session AND r.state IN ('queued','starting','running'))":null
-    const clauses=[...(harness?["COALESCE(o.harness,'legacy')=?"]:[]),...(scope?[scope]:[])]
+    const clauses=[...(excludeRetired?["COALESCE(o.harness,'legacy')<>'hermes'"]:[]),...(harness?["COALESCE(o.harness,'legacy')=?"]:[]),...(scope?[scope]:[])]
     const where=clauses.length?' WHERE '+clauses.join(' AND '):''
     const params=harness ? [harness] : []
     const total=this.db.prepare('SELECT COUNT(*) AS n FROM sources s LEFT JOIN session_origins o ON s.session=o.session'+where).get(...params).n
@@ -496,7 +502,7 @@ export class ClaudeStore {
     const firstLevel=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness==='dsh'?0:1
     return this.db.prepare('SELECT n.id,n.level,n.first,n.last,n.children FROM nodes n WHERE n.session=? AND n.level>=? AND '+dshVisibleNodes(this.db)+' ORDER BY n.level DESC,n.first').all(session,firstLevel).map(node=>dshNodeSources(this.db,session,{...node,children:JSON.parse(node.children)}))
   }
-  harnessGroups() { return this.db.prepare("SELECT COALESCE(o.harness,'legacy') AS harness,COUNT(*) AS n FROM sources s LEFT JOIN session_origins o ON o.session=s.session GROUP BY 1 ORDER BY 2 DESC").all() }
+  harnessGroups(excludeRetired=false) { return this.db.prepare("SELECT COALESCE(o.harness,'legacy') AS harness,COUNT(*) AS n FROM sources s LEFT JOIN session_origins o ON o.session=s.session"+(excludeRetired?" WHERE COALESCE(o.harness,'legacy')<>'hermes'":'')+" GROUP BY 1 ORDER BY 2 DESC").all() }
   summarizing(session) { return Boolean(this.db.prepare('SELECT 1 FROM leases WHERE session=? AND until_ms>?').get(session,Date.now())) }
   // Most recent visible messages, oldest first, within a character budget.
   recent(session, maxChars=6000) {
@@ -510,17 +516,17 @@ export class ClaudeStore {
     return out
   }
   // Substring search (works for CJK) across one or all conversations.
-  find(query, {session, harness, limit=20}={}) {
+  find(query, {session, harness, limit=20,excludeRetired=false}={}) {
     const cap=bounded(limit,20,50)
     if (query===undefined || query==='') {
-      const list=this.listSessions(cap,0,harness)
+      const list=this.listSessions(cap,0,harness,'all',excludeRetired)
       return {conversations:list.sessions.map(({session,code,harness,name,records,summary_count,updated_ms})=>({session,code,harness,name,records,summary_count,updated_ms})),total:list.total}
     }
     if (typeof query!=='string' || query.length>200) throw new Error('Query must be 1–200 characters')
     const like='%'+query.trim().replace(/[\\%_]/g,m=>'\\'+m)+'%'
-    const scope=session?' AND x.session=?':harness?" AND x.session IN (SELECT session FROM session_origins WHERE harness=?)":''
+    const scope=(session?' AND x.session=?':harness?" AND x.session IN (SELECT session FROM session_origins WHERE harness=?)":'')+(excludeRetired?" AND x.session NOT IN (SELECT session FROM session_origins WHERE harness='hermes')":'')
     const args=session?[session]:harness?[harness]:[]
-    const conversations=session?[]:this.resolve(query).filter(m=>!harness||m.harness===harness).slice(0,10)
+    const conversations=session?[]:this.resolve(query).filter(m=>(!harness||m.harness===harness)&&(!excludeRetired||m.harness!=='hermes')).slice(0,10)
     const summaries=this.db.prepare(`SELECT x.session,x.id,x.level,x.first,x.last,x.summary FROM nodes x WHERE x.summary LIKE ? ESCAPE '\\' AND ${dshVisibleNodes(this.db,'x')}${scope} ORDER BY x.level DESC,x.first DESC LIMIT ?`).all(like,...args,cap).map(r=>({...r,conversation:this.metadata(r.session)}))
     const events=this.db.prepare(`SELECT x.session,x.ordinal,x.preview FROM events x WHERE x.preview LIKE ? ESCAPE '\\'${scope} ORDER BY x.rowid DESC LIMIT ?`).all(like,...args,cap).map(r=>{const i=r.preview.toLowerCase().indexOf(query.trim().toLowerCase());return {session:r.session,ordinal:r.ordinal,snippet:r.preview.slice(Math.max(0,i-120),i+240),conversation:this.metadata(r.session)}})
     return {query,conversations,summaries,events}

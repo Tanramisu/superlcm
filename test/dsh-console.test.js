@@ -18,7 +18,7 @@ const tree = () => [
 test('compression capabilities distinguish native engine, takeover and summary-only adapters', () => {
   assert.equal(compressionCapabilities.dsh.owner, 'superlcm')
   assert.equal(compressionCapabilities['claude-code'].mode, 'takeover')
-  for (const h of ['codex','hermes','pi']) assert.equal(compressionCapabilities[h].supported, false)
+  for (const h of ['codex','pi']) assert.equal(compressionCapabilities[h].supported, false)
 })
 test('DSH reports config only when exactly one engine and archive are composed', () => {
   const rows = tree(); assert.equal(inspectDshTree(rows).configured, true)

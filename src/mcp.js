@@ -26,7 +26,7 @@ const agentTools = new Set(['lcm_summary_task','lcm_summary_submit'])
 for (const t of tools) t.annotations = { readOnlyHint: !agentTools.has(t.name), destructiveHint: false, idempotentHint: true, openWorldHint: false }
 // Summary-writing tools are only offered when some scope actually uses in-conversation summaries.
 export function listTools(store) {
-  const agent = store.globalSetting()?.mode === 'agent' || store.harnessSettings().some(h => h.mode === 'agent') || (!store.globalSetting() && summaryMode() === 'agent')
+  const agent = store.globalSetting()?.mode === 'agent' || store.harnessSettings().some(h => h.harness!=='hermes'&&h.mode === 'agent') || (!store.globalSetting() && summaryMode() === 'agent')
   return agent ? tools : tools.filter(t => !agentTools.has(t.name))
 }
 export async function call(store,name,args = {}) {

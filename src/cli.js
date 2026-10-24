@@ -80,24 +80,26 @@ else if (command==='web') {
   try { const web=await startWeb({port});process.stdout.write(`SuperLcm local console: ${web.url}\n`) }
   catch(error) { if(error.code!=='EADDRINUSE')throw error; process.stderr.write(`Port ${port} is already in use. If the console is already running, open http://127.0.0.1:${port}/ ; otherwise pass another port: node src/cli.js web <port>\n`); process.exitCode=1 }
 }
-else if (command==='hermes-hook' || command==='pi-hook') {
-  // Called by Hermes (shell hook, synchronous) and by the SuperLcm Pi extension after each turn.
-  const store=new ClaudeStore(),hermes=command==='hermes-hook'
+// Retired hooks stay inert so an older host configuration cannot resume capture.
+else if (command==='hermes-hook') { process.stdin.resume();process.stdout.write('{}\n') }
+else if (command==='pi-hook') {
+  // Called by the SuperLcm Pi extension after each turn.
+  const store=new ClaudeStore()
   let reply={}
   try {
     const input=await readHook(),event=input.hook_event_name
     // A background summary run (SUPERLCM_CLI_WORKER) is never captured as a conversation.
-    if(process.env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled(hermes?'hermes':'pi'))throw Object.assign(new Error('skip'),{quiet:true})
-    const {captureHermes}=await import('./hermes.js'),{capturePi}=await import('./pi.js')
-    const result=hermes?captureHermes(store,input.session_id,{automatic:true}):capturePi(store,input,{automatic:true})
+    if(process.env.SUPERLCM_CLI_WORKER==='1'||!store.integrationEnabled('pi'))throw Object.assign(new Error('skip'),{quiet:true})
+    const {capturePi}=await import('./pi.js')
+    const result=capturePi(store,input,{automatic:true})
     if(!result.skipped&&store.source(result.session)){
-      store.markClient(hermes?'hermes':'pi','hook')
+      store.markClient('pi','hook')
       const {mode,model}=effective(store,result.session)
       if(['off','cli','api'].includes(mode))store.setSummaryMode(result.session,mode)
       if(event==='session_compact')store.markCompaction(result.session)
-      if(['on_session_end','on_session_finalize','agent_settled','session_compact','session_shutdown'].includes(event))scheduleSummary(store,result.session,mode,model)
-      // Hermes pre_llm_call / Pi before_agent_start: the only moments a note can reach the AI this turn.
-      if(['pre_llm_call','before_agent_start'].includes(event)&&mode==='agent'){const note=summaryNudge(store,result.session);if(note)reply={context:note}}
+      if(['agent_settled','session_compact','session_shutdown'].includes(event))scheduleSummary(store,result.session,mode,model)
+      // Pi before_agent_start: the only moments a note can reach the AI this turn.
+      if(event==='before_agent_start'&&mode==='agent'){const note=summaryNudge(store,result.session);if(note)reply={context:note}}
     }
   } catch(error) { if(!error.quiet)process.stderr.write('SuperLcm: '+error.message+'\n') }
   finally { store.close() }
@@ -383,4 +385,4 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
   const store=new ClaudeStore()
   try { const results=store.archiveAll(); for(const r of results)if(!r.archived||r.copied||r.found_at)process.stdout.write(JSON.stringify(r)+'\n'); process.stdout.write(`archived ${results.filter(r=>r.archived).length}/${results.length} conversations\n`); if(results.some(r=>!r.archived))process.exitCode=1 }
   finally { store.close() }
-} else { process.stderr.write('Usage: node src/cli.js mcp|web [port]|archive|compact-packet <session>|doctor-local|setup <codex|claude-code|hermes|pi|dsh> [--provider name] [--model name] [--apply]|hook|codex-hook|hermes-hook|pi-hook|index|index-codex|import <path> [session] [harness] [name]|name <session> <title>|overview|summarize\n'); process.exitCode=2 }
+} else { process.stderr.write('Usage: node src/cli.js mcp|web [port]|archive|compact-packet <session>|doctor-local|setup <codex|claude-code|pi|dsh> [--provider name] [--model name] [--apply]|hook|codex-hook|pi-hook|index|index-codex|import <path> [session] [harness] [name]|name <session> <title>|overview|summarize\n'); process.exitCode=2 }

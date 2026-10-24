@@ -121,23 +121,6 @@ test('authenticated Web workflow detects, indexes, pages nodes and gates setup',
  }finally{await web.close()}
 }))
 
-test('Hermes conversations are mirrored losslessly, compression chains merge, hooks append new rows',fixture(({env,store})=>{
- env.HERMES_HOME=join(env.HOME,'hermes');mkdirSync(env.HERMES_HOME);const file=join(env.HERMES_HOME,'state.db'),db=new DatabaseSync(file)
- db.exec('CREATE TABLE sessions(id TEXT,title TEXT,started_at REAL,parent_session_id TEXT,end_reason TEXT,source TEXT,model_config TEXT);CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,tool_name TEXT,active INTEGER)')
- const session=db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?)'),message=db.prepare('INSERT INTO messages VALUES(?,?,?,?,?,?)')
- session.run('h1','Hermes source',1000,null,'compression','tui',null);session.run('h2',null,2000,'h1',null,'tui',null);session.run('sub','Delegated',1500,'h1','agent_close','subagent','{"_delegate_from":"h1"}')
- message.run(1,'h1','user','first decision',null,0);message.run(2,'h1','tool','tool output kept',"terminal",1);message.run(3,'h2','assistant','after compaction',null,1);message.run(4,'sub','user','separate subagent',null,1)
- const list=localConversations(store,'hermes',{env});assert.deepEqual(list.conversations.map(c=>c.conversation_id),['h1'],'continuations and delegated subagent runs are not listed separately')
- const saved=indexLocalConversation(store,'hermes',list.conversations.find(c=>c.conversation_id==='h1').key,{env})
- assert.equal(saved.session,'hermes-h1');assert.equal(store.stats('hermes-h1').records,3,'inactive and tool rows are kept');assert.match(store.exact('hermes-h1',1),/tool output kept/);assert.equal(store.metadata('hermes-h1').name,'Hermes source');assert.equal(store.lastCompaction('hermes-h1'),2,'the first row of the continuation session marks the compaction')
- message.run(5,'h2','user','new turn',null,1);db.prepare("UPDATE messages SET content='rewritten' WHERE id=1").run();db.close()
- const hook=spawnSync(process.execPath,[script,'hermes-hook','--home',store.dir],{env:{...env,SUPERLCM_SUMMARY_MODE:'off'},input:JSON.stringify({hook_event_name:'on_session_end',session_id:'h2'}),encoding:'utf8',timeout:10000})
- assert.equal(hook.status,0,hook.stderr);assert.equal(hook.stdout.trim(),'{}')
- const again=new ClaudeStore(store.dir);try{assert.equal(again.stats('hermes-h1').records,4,'the hook appended the new row to the same conversation');assert.match(again.exact('hermes-h1',0),/first decision/,'the mirrored original is not rewritten')
- again.deleteSession('hermes-h1')}finally{again.close()}
- const skip=spawnSync(process.execPath,[script,'hermes-hook','--home',store.dir],{env,input:JSON.stringify({hook_event_name:'on_session_end',session_id:'h2'}),encoding:'utf8',timeout:10000})
- assert.equal(skip.status,0);const after=new ClaudeStore(store.dir);try{assert.equal(after.source('hermes-h1'),undefined,'a deleted conversation is not recaptured')}finally{after.close()}
-}))
 test('Pi session files are indexed byte for byte with every branch, and the hook appends new lines',fixture(({env,store})=>{
  env.PI_CODING_AGENT_DIR=join(env.HOME,'pi-agent');const root=configFiles('pi',env).transcripts;mkdirSync(join(root,'--proj--'),{recursive:true});const file=join(root,'--proj--','session.jsonl')
  const records=[{type:'session',id:'pi-1',version:3},{type:'message',id:'a',parentId:null,message:{role:'user',content:[{type:'text',text:'root question'}]}},{type:'message',id:'b',parentId:'a',message:{role:'assistant',content:[{type:'text',text:'abandoned answer'}]}},{type:'message',id:'c',parentId:'a',message:{role:'toolResult',content:[{type:'text',text:'tool result'}]}}]
@@ -172,7 +155,7 @@ test('setup prefers a node no AI tool bundles, and replaces an older SuperLcm ho
     assert.equal(nodeOwner(join(bundled, 'node'), { HOME: dir }), null, 'the link resolves outside the tool folder, so it is not borrowed')
     assert.equal(preferredNode({ HOME: dir, PATH: '' }).path, process.execPath)
     const inside = join(dir, '.hermes', 'bin'); mkdirSync(inside, { recursive: true }); writeFileSync(join(inside, 'node'), '#!/bin/sh\n', { mode: 0o755 })
-    assert.equal(nodeOwner(join(inside, 'node'), { HOME: dir }), 'Hermes', 'a node inside a tool folder is borrowed')
+    assert.equal(nodeOwner(join(inside, 'node'), { HOME: dir }), 'Other tool', 'a node inside a tool folder is borrowed')
     const env = { ...process.env, HOME: dir, CODEX_HOME: join(dir, 'codex'), SUPERLCM_CODEX_CLI_BIN: process.execPath }
     const store = new ClaudeStore(join(dir, 'index'))
     try {

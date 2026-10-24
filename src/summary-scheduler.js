@@ -10,6 +10,7 @@ export function summaryQueueRevision(store,session,{backend=null,env=process.env
 export function enqueueSummary(store,session,{backend=null,mode,model,origin='manual',env=process.env}={}) {
   recoverSummaryRuns(store,{env})
   if(!store.source(session)||store.isDeleted(session))throw Error('Unknown conversation')
+  if(store.metadata(session).harness==='hermes')throw Error('Unsupported harness')
   const explicit=backend!==null,chosen=store.effectiveSetting(session,env)
   mode=backend||mode||chosen.mode
   if(!['cli','api'].includes(mode))throw Error('Background summaries are disabled for this session')

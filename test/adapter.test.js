@@ -11,10 +11,9 @@ import { normalizeApiEndpoint } from '../src/api-endpoint.js'
 import { createServer, request } from 'node:http'
 import { summarizeWithClaudeCli } from '../src/claude-cli.js'
 import { workerEnv } from '../src/runtime.js'
-import { summarizeWithHermes, summarizeWithPi } from '../src/cli-writers.js'
+import { summarizeWithPi } from '../src/cli-writers.js'
 import { summaryMode } from '../src/mode.js'
 import { codexHookTrust } from '../src/codex-hook-trust.js'
-import { writeHermesConfig } from '../src/hermes-config.js'
 import { openInTerminal } from '../src/open-terminal.js'
 import { call, startServer, tools } from '../src/mcp.js'
 import { PassThrough } from 'node:stream'
@@ -296,7 +295,6 @@ test('CLI model metadata uses real catalog and explicit cache fallback',fixture(
   const codex=await modelCatalog('codex-cli',{env:{CODEX_HOME:dir},runCommand:async()=>{throw Error('offline')}});assert.deepEqual(codex.models.map(x=>x.id),['gpt-listed']);assert.equal(codex.status,'cached');assert.equal(codex.updated_at,'test-date')
   const calls=[];const live=await modelCatalog('codex-cli',{env:{CODEX_HOME:dir},runCommand:async(bin,args)=>{calls.push(args);return {stdout:JSON.stringify({models:[{slug:'provider/model',visibility:'list'}]})}}});assert.deepEqual(calls,[['debug','models']]);assert.equal(live.models[0].id,'provider/model');assert.equal(live.status,'live')
   const claude=await modelCatalog('cli',{readClaude:async()=>[{value:'opus[1m]',resolvedModel:'claude-real[1m]',displayName:'Actual CLI model'}]});assert.equal(claude.models[0].id,'opus[1m]');assert.equal(claude.models[0].resolved_model,'claude-real[1m]');assert.equal(claude.source,'Claude CLI · initialize.models')
-  const hermes=await modelCatalog('hermes',{readHermes:async()=>({model:'up/solar:free',provider:'nous',models:['a/one','a/one:batch','up/solar:free','$(bad)']})});assert.deepEqual(hermes.models.map(x=>x.id),['up/solar:free','a/one'],'default first, batch variants and unsafe IDs dropped');assert.equal(hermes.provider,'nous')
   const failed=await modelCatalog('cli',{readClaude:async()=>{throw Error('No catalog')}});assert.deepEqual(failed.models,[]);assert.equal(failed.status,'unavailable')
 }))
 test('a custom API saved on a tool before added models existed becomes an added model with its key',()=>{
@@ -411,11 +409,8 @@ test('session Codex CLI choice dispatches through an isolated fake executable',f
   const bin=join(dir,'fake-codex');writeFileSync(bin,'#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({type:\'item.completed\',item:{type:\'agent_message\',text:\'# Independent Codex worker summary recorded decisions.\'}})+\'\\n\'+JSON.stringify({type:\'turn.completed\'})+\'\\n\')\n',{mode:0o700})
   const cli=fileURLToPath(new URL('../src/cli.js',import.meta.url)),r=spawnSync(process.execPath,[cli,'summarize','chosen-backend'],{encoding:'utf8',env:{...process.env,SUPERLCM_HOME:store.dir,SUPERLCM_CODEX_CLI_BIN:bin,SUPERLCM_SUMMARY_MODE:'off'},timeout:15000})
   assert.equal(r.status,0,r.stderr);assert.match(store.summaries('chosen-backend').nodes[0].model,/codex-cli:gpt-test/)
-  // Hermes and Pi write through their own one-shot modes, marked so SuperLcm's hooks skip the run.
+  // Pi writes through their own one-shot modes, marked so SuperLcm's hooks skip the run.
   const fake=out=>{let seen={};const spawnProcess=(bin,args,options)=>{seen={bin,args,options};const child=Object.assign(new EventEmitter(),{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>{}});child.stdin.on('data',d=>{seen.input=(seen.input||'')+d});queueMicrotask(()=>{child.stdout.end(out);child.stderr.end();child.emit('close',0)});return child};return {seen:()=>seen,spawnProcess}}
-  const h=fake('{"type": "system"}\n{"type": "result", "exit_code": 0, "text": "Hermes summary"}\n')
-  assert.equal(await summarizeWithHermes('decision',{model:'m/x',bin:'hermes',cwd:join(dir,'w'),env:{},spawnProcess:h.spawnProcess}),'Hermes summary')
-  assert.deepEqual(h.seen().args.slice(0,7),['chat','--query-file','-','--format','stream-json','--source','tool']);assert.deepEqual(h.seen().args.slice(-2),['-m','m/x']);assert.equal(h.seen().options.env.SUPERLCM_CLI_WORKER,'1');assert.match(h.seen().input,/conversation_excerpt/)
   const pi=fake('Pi summary\n')
   assert.equal(await summarizeWithPi('decision',{bin:'pi',cwd:join(dir,'w'),env:{},spawnProcess:pi.spawnProcess}),'Pi summary')
   for(const flag of ['-p','--no-session','--no-tools','--no-extensions'])assert.ok(pi.seen().args.includes(flag),flag)
@@ -650,18 +645,6 @@ if(m.id===3){fs.writeFileSync(${JSON.stringify(log)},JSON.stringify(m.params));t
   assert.deepEqual([approved.total,approved.ok],[1,true])
 }))
 
-const python3=spawnSync('python3',['-c','pass']).status===0
-test('reconnecting Hermes replaces the older SuperLcm hook instead of adding a second one',{skip:!python3||process.platform==='win32'},fixture(async ({dir})=>{
-  const modules=join(dir,'py','hermes_cli');mkdirSync(modules,{recursive:true});writeFileSync(join(modules,'__init__.py'),'')
-  writeFileSync(join(modules,'config.py'),"import json, os\ndef load_config():\n    return json.load(open(os.environ['TEST_CONFIG']))\ndef save_config(v):\n    json.dump(v, open(os.environ['TEST_CONFIG'], 'w'))\n")
-  writeFileSync(join(modules,'mcp_config.py'),'def _save_mcp_server(name, value): return True\n')
-  const config=join(dir,'config.json'),script='/h/.superlcm-claude/superlcm.js',shim=join(dir,'python-shim')
-  writeFileSync(config,JSON.stringify({hooks:{on_session_end:[{command:`'/old/node' '${script}' hermes-hook`},{command:'echo other'}]}}))
-  writeFileSync(shim,`#!/bin/sh\nexec python3 -c 'import sys;sys.path.insert(0, "${join(dir,'py')}");exec(sys.argv[1])' "$2"\n`,{mode:0o700})
-  await writeHermesConfig({...process.env,HERMES_HOME:dir,SUPERLCM_HERMES_PYTHON:shim,TEST_CONFIG:config},{mcp:null,script,hooks:{on_session_end:{command:`'/new/node' '${script}' hermes-hook`}}})
-  assert.deepEqual(JSON.parse(readFileSync(config,'utf8')).hooks.on_session_end.map(h=>h.command),['echo other',`'/new/node' '${script}' hermes-hook`])
-}))
-
 test('opening Codex for its own hook review launches only the fixed CLI in a terminal',fixture(async ({dir})=>{
   const calls=[],spawnProcess=(cmd,args)=>{calls.push([cmd,...args]);return {on(){},unref(){}}}
   assert.deepEqual(openInTerminal("/opt/co'dex",{dir,name:'open-codex',platform:'darwin',spawnProcess}),{opened:true,how:'Terminal'})
@@ -738,45 +721,3 @@ test('a local gateway on this computer needs no API key',fixture(async ({dir,sto
   assert.equal(store.apiCredential('gw'),'');assert.equal(store.apiConfig('gw').apiKey,'')
   store.setHarnessSetting('claude-code','api','m','openai','https://api.example.com/v1');assert.equal(store.apiCredential('gw'),null);assert.equal(store.apiConfig('gw'),null)
 }))
-
-test('Hermes captures running at the same time store each message once',fixture(async ({dir})=>{
-  const hermes=join(dir,'hermes-state'),home=join(dir,'capture-home');mkdirSync(hermes,{recursive:true})
-  const native=new DatabaseSync(join(hermes,'state.db'))
-  native.exec("CREATE TABLE sessions(id TEXT PRIMARY KEY,parent_session_id TEXT,end_reason TEXT,title TEXT,started_at INTEGER);CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT);INSERT INTO sessions VALUES('root',NULL,NULL,'t',1)")
-  const code=`import {ClaudeStore} from ${JSON.stringify(new URL('../src/store.js',import.meta.url).href)};import {captureHermes} from ${JSON.stringify(new URL('../src/hermes.js',import.meta.url).href)};const s=new ClaudeStore(${JSON.stringify(home)});captureHermes(s,'root',{env:{...process.env,HERMES_HOME:${JSON.stringify(hermes)}}});s.close()`
-  const capture=()=>new Promise(done=>spawn(process.execPath,['--no-warnings','--input-type=module','-e',code],{stdio:'ignore'}).on('close',done))
-  let id=1
-  for(let round=0;round<4;round++){for(let k=0;k<3;k++)native.exec(`INSERT INTO messages VALUES(${id},'root','user','m${id++}')`);await Promise.all([capture(),capture(),capture()])}
-  native.close()
-  const store=new ClaudeStore(home),[session]=store.db.prepare('SELECT session FROM sources').all().map(r=>r.session)
-  assert.equal(store.eventRows(session).length,id-1)
-  store.close()
-}))
-
-test('Hermes Python is found through a launcher that execs the entry script quoted or bare', async () => {
-  const { hermesRuntime,hermesRuntimeAsync } = await import('../src/hermes-config.js')
-  const dir = mkdtempSync(join(tmpdir(), 'superlcm-hermes-launcher-')), entry = join(dir, 'entry'), launcher = join(dir, 'hermes')
-  // Hermes 0.21.5+: the entry script reports its runtime command with --print-runtime-command.
-  writeFileSync(entry, `#!/bin/sh\n# --print-runtime-command\necho '${JSON.stringify([process.execPath, '-I', '-c', 'import sys; runpy.run_module("hermes_cli.main")'])}'\n`); chmodSync(entry, 0o755)
-  for (const line of [`exec ${entry} "$@"`, `exec "${entry}" "$@"`]) {
-    writeFileSync(launcher, `#!/bin/sh\n${line}\n`); chmodSync(launcher, 0o755)
-    const runtime = hermesRuntime({ ...process.env, SUPERLCM_HERMES_BIN: launcher, SUPERLCM_HERMES_PYTHON: '' })
-    assert.equal(runtime?.python, process.execPath, line)
-    assert.deepEqual(runtime.args, ['-I'])
-    assert.deepEqual(await hermesRuntimeAsync({ ...process.env, SUPERLCM_HERMES_BIN: launcher, SUPERLCM_HERMES_PYTHON: '' }),runtime)
-  }
-  rmSync(dir, { recursive: true, force: true })
-})
-
-test('Hermes runtime discovery yields while a launcher is starting',async()=>{
-  const {hermesRuntimeAsync}=await import('../src/hermes-config.js')
-  const dir=mkdtempSync(join(tmpdir(),'superlcm-hermes-async-')),launcher=join(dir,'hermes')
-  const command=[process.execPath,'-I','-c','import sys; runpy.run_module("hermes_cli.main")']
-  writeFileSync(launcher,`#!${process.execPath}\n// --print-runtime-command\nsetTimeout(()=>process.stdout.write(${JSON.stringify(JSON.stringify(command)+'\n')}),100)\n`);chmodSync(launcher,0o755)
-  let yielded=false
-  const timer=setTimeout(()=>{yielded=true},10)
-  try {
-    const runtime=await hermesRuntimeAsync({...process.env,SUPERLCM_HERMES_BIN:launcher,SUPERLCM_HERMES_PYTHON:''})
-    assert.equal(runtime.python,process.execPath);assert.equal(yielded,true,'another console request can run while Hermes starts')
-  }finally{clearTimeout(timer)}
-})
