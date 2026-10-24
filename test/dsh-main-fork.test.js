@@ -133,3 +133,26 @@ test('DSH rejects an auxiliary model that cannot hold the complete branch and pr
   assert.ok(h.warnings.some(message=>message.includes('输入空间')))
  }finally{await close(h)}
 })
+
+test('real DSH preserves recent originals with an oversized 80K retention preference on a 64K model',async()=>{
+ const h=await lab({capacity:64000,config:{summaryMode:'main-fork',keepRecentTokens:80000}})
+ try {
+  history(h,.72)
+  const original=h.ctx.llm.stream.bind(h.ctx.llm);let branches=0
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches++
+   const directive=options.messages.at(-1).content.map(b=>b.text||'').join('')
+   const plan=JSON.parse(directive.split('\n').find(line=>line.startsWith('[{"index":')))
+   yield {type:'text-delta',index:0,text:JSON.stringify({blocks:plan.map(n=>({index:n.index,summary:'# Historical decisions\nOriginal records retain all precise facts. Task remains pending.'}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  await send(h,'CURRENT REQUEST MUST STAY EXACT');await h.engine.settleBackgroundFold(h.agent)
+  assert.equal(h.engine.backgroundFolds.get(h.agent)?.status,'ready',h.warnings.join('\n'))
+  await send(h,'APPENDED AFTER PREPARATION '+ 't'.repeat(28000))
+  assert.equal(count(h,'compaction/summary'),1,h.warnings.join('\n'))
+  assert.equal(branches,1);assert.equal(h.errors.length,0)
+  assert.ok(h.main.at(-1).content.includes('CURRENT REQUEST MUST STAY EXACT'))
+  assert.ok(h.main.at(-1).content.includes('APPENDED AFTER PREPARATION'))
+  await checkpoint(h,{duplicate:false})
+ }finally{await close(h)}
+})

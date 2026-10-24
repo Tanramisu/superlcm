@@ -43,7 +43,8 @@ function renderForkModelPicker(harness) {
   let draft=nativeForkModels.get(harness)
   if(draft&&!draft.dirty&&!draft.busy&&(draft.expected.mode!==current.mode||draft.expected.model!==current.model)){nativeForkModels.delete(harness);draft=null}
   if(!draft){draft={expected:current,other:!!current.model,model:current.model,dirty:false,loading:false,busy:false,error:''};nativeForkModels.set(harness,draft)}
-  const disabled=current.mode!=='main-fork'||draft.busy
+  const controlBusy=harness==='pi'&&piControls.busy
+  const disabled=current.mode!=='main-fork'||draft.busy||controlBusy
   const models=admin.catalog[harness]?.models||[]
   const provider=m=>harness==='pi'?m.id.slice(0,m.id.indexOf('/')):'Claude Code'
   const providers=[...new Set(models.map(provider))]
@@ -53,7 +54,7 @@ function renderForkModelPicker(harness) {
     (current.mode==='main-fork'?'':'<p class="desc">'+t('请先在「工具」页选择主模型后台分支。')+'</p>')+
     (draft.other?'<div class="fields"><label class="field">'+t('摘要模型供应商')+'<select data-fork-provider'+(disabled||draft.loading?' disabled':'')+'><option value="">'+t('选择供应商')+'</option>'+providers.map(p=>'<option value="'+esc(p)+'"'+(selectedProvider===p?' selected':'')+'>'+esc(p)+'</option>').join('')+'</select></label><label class="field">'+t('摘要模型')+'<select data-fork-model'+(disabled||draft.loading?' disabled':'')+'><option value="">'+t('选择模型')+'</option>'+selected.map(m=>'<option value="'+esc(m.id)+'"'+(draft.model===m.id?' selected':'')+'>'+esc(harness==='pi'&&m.label===m.id?m.id.slice(m.id.indexOf('/')+1):m.label)+'</option>').join('')+'</select></label></div><p class="desc">'+t('使用本工具已配置的模型和账号，只改变后台摘要模型。')+'</p>':'')+
     (draft.loading?'<p role="status">'+t('正在读取模型列表…')+'</p>':'')+(draft.error?'<p role="alert">'+esc(draft.error)+'</p>':'')+
-    '<div class="actions"><button type="button" class="btn" data-fork-save'+(disabled||draft.loading||!draft.dirty?' disabled':'')+'>'+t('保存摘要模型')+'</button><button type="button" class="link" data-fork-read'+(draft.busy||draft.loading?' disabled':'')+'>'+t('重新读取模型')+'</button><span class="saved">'+(draft.dirty?t('有未保存的修改'):'')+'</span></div>'
+    '<div class="actions"><button type="button" class="btn" data-fork-save'+(disabled||draft.loading||!draft.dirty?' disabled':'')+'>'+t('保存摘要模型')+'</button><button type="button" class="link" data-fork-read'+(draft.busy||draft.loading||controlBusy?' disabled':'')+'>'+t('重新读取模型')+'</button><span class="saved">'+(draft.dirty?t('有未保存的修改'):'')+'</span></div>'
   const dirty=()=>{draft.dirty=true;renderForkModelPicker(harness)}
   root.querySelector('[data-fork-other]').onchange=e=>{draft.other=e.target.checked;dirty();if(draft.other&&!admin.catalog[harness])act(()=>loadForkModels(harness))}
   root.querySelector('[data-fork-provider]')?.addEventListener('change',e=>{draft.provider=e.target.value;draft.model='';dirty()})

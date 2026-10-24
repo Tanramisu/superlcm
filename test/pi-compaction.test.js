@@ -58,7 +58,7 @@ test('Pi rejects a wrong branch boundary, deleted capture and missing API before
 test('Pi cancellation and settings changes retain context and cannot publish a stale summary', async t => {
   const f = fixture(t), controller = new AbortController()
   await assert.rejects(compactPi(f.store, f.input, { env: f.env, signal: controller.signal, summarize: async () => { controller.abort(); return summary } }), /abort/i)
-  await assert.rejects(compactPi(f.store, f.input, { env: f.env, summarize: async () => { savePiPolicy(f.store, { enabled: false, ratio: 0.8,summaryEnabled:false,summaryMode:'main-fork' }); return summary } }), /设置已变化/)
+  await assert.rejects(compactPi(f.store, f.input, { env: f.env, summarize: async () => { savePiPolicy(f.store, { enabled: false, ratio: 0.8,keep:40000,summaryEnabled:false,summaryMode:'main-fork' }); return summary } }), /设置已变化/)
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM pi_compaction_chunks').get().n, 0)
 })
 test('Pi verifies originals again if source bytes change during summarization', async t => {
@@ -296,7 +296,7 @@ test('Pi subprocess cancellation rejects without a model or orphaned child', asy
 })
 test('Pi takeover is opt-in and malformed policies fail closed', t => {
   const f = fixture(t)
-  assert.deepEqual(readPiPolicy(join(f.dir, 'unconfigured')), { enabled: false, ratio: 0.8,summaryEnabled:false,summaryMode:'main-fork' })
+  assert.deepEqual(readPiPolicy(join(f.dir, 'unconfigured')), { enabled: false, ratio: 0.8,keep:40000,summaryEnabled:false,summaryMode:'main-fork' })
   writeFileSync(join(f.store.dir, 'pi-compaction.json'), '{bad')
   assert.throws(() => readPiPolicy(f.store.dir))
 })
@@ -472,4 +472,22 @@ test('Pi background failure tolerates a policy that became unreadable during gen
   await assert.doesNotReject(work)
   assert.equal(r.api.getState(), null)
   r.handlers.get('session_shutdown')()
+})
+
+test('Pi retention overrides native settings and caps at half of the current dialogue',()=>{
+ const rows=Array.from({length:30},(_,i)=>({sourceEntry:{id:'e'+i,type:'message'},messages:[{role:i%2?'assistant':'user',content:[{type:'text',text:'exact original '.repeat(700)}]}]}))
+ const ctx={model:{contextWindow:100000},sessionManager:{buildSessionProjection:()=>({entries:rows}),getSessionId:()=> 'retention',getSessionFile:()=>'/fixture',getLeafId:()=> 'e29'},getContextUsage:()=>({tokens:80000})}
+ const snapshot=keep=>makePiSnapshot(ctx,{enabled:true,ratio:.8,keep},{compaction:{keepRecentTokens:9999999}})
+ const small=snapshot(5000),large=snapshot(40000),capped=snapshot(200000)
+ assert.ok(Number(small.firstKeptEntryId.slice(1))>Number(large.firstKeptEntryId.slice(1)))
+ assert.equal(capped.firstKeptEntryId,large.firstKeptEntryId)
+ assert.notEqual(capped.draftKey,large.draftKey)
+ assert.equal(snapshotMatches(large,rows,small.signature),false)
+})
+test('changing Pi retention invalidates an already prepared API replacement without another model call',async t=>{
+ const f=fixture(t);f.input.draftKey='e'.repeat(64)
+ let calls=0;await preparePi(f.store,f.input,{env:f.env,summarize:async()=>{calls++;return summary}})
+ assert.ok(readPreparedPi(f.store,f.input,{env:f.env}))
+ savePiPolicy(f.store,{enabled:true,ratio:.8,keep:80000})
+ assert.equal(readPreparedPi(f.store,f.input,{env:f.env}),null);assert.equal(calls,1)
 })

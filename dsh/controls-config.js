@@ -1,3 +1,4 @@
+import {recentKeep} from '../src/recent-retention.js'
 import {sharedControls} from './settings.js'
 // The console owns this private document. Native engines consume it at boot
 // and while running; there is one document for every DSH launch mode.
@@ -17,6 +18,7 @@ export function controlsConfig(raw) {
   if (raw.summaryMode !== undefined && !['api','main-fork'].includes(raw.summaryMode)) throw Error('摘要方式无效')
   if(raw.forkModelOverride!==undefined&&typeof raw.forkModelOverride!=='boolean')throw Error('后台模型开关无效')
   const out={forkModelOverride:raw.forkModelOverride??false,auto:raw.auto,summaryMode:raw.summaryMode||'api',budgetMode,...ratioOptions(raw)}
+  if(raw.keepRecentTokens!==undefined)out.keepRecentTokens=recentKeep(raw.keepRecentTokens)
   for(const [key,[min,max,fallback]] of Object.entries(controlFields)) {
     const value=raw[key]??(budgetMode==='ratio'&&key==='foldBatchTokens'?20000:fallback)
     if(!Number.isSafeInteger(value)||value<min||value>max)throw Error('压缩参数无效：'+key)

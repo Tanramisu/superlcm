@@ -33,6 +33,7 @@ export const engineSchema = z.object({
     emergencyRatio:z.number().min(0.03).max(0.999).default(0.9).volatile(),
     mode: z.const('rolling').default(ROLLING_DEFAULTS.mode).volatile(),
     tailCount: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(ROLLING_DEFAULTS.tailCount).volatile(),
+    keepRecentTokens: z.number().step(1).min(5000).max(200000).volatile(),
     minRetainTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(ROLLING_DEFAULTS.minRetainTokens).volatile(),
     pressureFoldTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(ROLLING_DEFAULTS.pressureFoldTokens).volatile(),
     foldBatchTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(ROLLING_DEFAULTS.foldBatchTokens).volatile(),

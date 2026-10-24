@@ -127,7 +127,7 @@ export function page(nonce) {
         <p class="desc">在这里添加模型，之后在「工具」页任意工具的卡片上选「独立 API（高级）」就能挑它来写摘要。改了这里，用它的工具一起生效。密钥只存在这台电脑上。</p>
         <div id="apiModels"></div>
         <h3>粒度</h3>
-        <p class="desc">只影响之后新生成的摘要，已有摘要保持不变。</p>
+        <p class="desc">所有工具共用这份粒度设置。只影响之后新生成的摘要，已有摘要保持不变。</p>
         <div class="fields">
           <label class="field">第 1 层每段原文<select id="segSize"><option value="10000">约 10,000 token · 更细</option><option value="20000">约 20,000 token · 推荐</option><option value="40000">约 40,000 token · 更省</option></select></label>
           <label class="field">合并方式<select id="fanout"><option value="3">每 3 段合并为上一层</option><option value="4">每 4 段合并为上一层 · 推荐</option><option value="6">每 6 段合并为上一层</option></select></label>
@@ -158,6 +158,7 @@ ${asset('web-i18n.js')}
 ${asset('web-client.js')}
 ${dshRuntimeState.toString()}
 ${dshGlobalState.toString()}
+${asset('web-retention-controls.js')}
 ${asset('web-compression.js')}
 ${asset('web-admin.js')}
 ${asset('web-dsh-controls.js')}

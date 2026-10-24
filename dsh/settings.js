@@ -1,4 +1,5 @@
 // The integrated plugin reads the same per-tool setting as the web console.
+import {defaultRecentKeep} from '../src/recent-retention.js'
 import {DatabaseSync} from 'node:sqlite'
 import {existsSync,readFileSync} from 'node:fs'
 import {join,dirname} from 'node:path'
@@ -25,6 +26,13 @@ export function readSettings(home){
 export function sharedControls(file,document){
   const summary=sharedSummary(dirname(file)),mode=summary.mode===null?(document.config.summaryMode||'api'):summary.mode==='main-fork'?'main-fork':'api'
   const config={...document.config,summaryMode:mode}
+  // The Settings page is the sole authority for chunk size and tree fanout.
+  if(summary.mode!==null){
+    if(config.keepRecentTokens===undefined&&config.budgetMode!=='tokens')config.keepRecentTokens=defaultRecentKeep
+    config.foldBatchTokens=summary.tuning.target_tokens||Math.floor((summary.tuning.target_chars||80000)/4)
+    config.pressureFoldTokens=Math.min(config.pressureFoldTokens??config.foldBatchTokens,config.foldBatchTokens)
+    config.condensedMinFanout=summary.tuning.fanout||4
+  }
   if(summary.mode==='off'||mode==='api'&&(!config.summarizationProvider||!config.summarizationModel||!config.summaryAdapter?.plugin))config.auto=false
   return {...document,revision:summary.mode===null?document.revision:document.revision+':'+forkHash(summary).slice(0,16),config}
 }

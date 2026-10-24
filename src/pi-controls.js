@@ -28,7 +28,7 @@ export function savePiCompression(store, input) {
     original = existsSync(file) ? readFileSync(file) : null
     if (routeChanged&&summaryMode!=='main-fork'&&apiRef) store.setHarnessSetting('pi', 'api', null, null, null, apiRef)
     else if(routeChanged&&summaryMode==='main-fork')store.setHarnessSetting('pi','main-fork')
-    savePiPolicy(store, { enabled: input.enabled, ratio: input.ratio, ...(routeChanged ? {summaryMode} : {}) }); written = true
+    savePiPolicy(store, { enabled: input.enabled, ratio: input.ratio, keep: input.keep===undefined?before.keep:input.keep, ...(routeChanged ? {summaryMode} : {}) }); written = true
     intended = piCompressionSettings(store)
     store.db.exec('COMMIT')
   } catch (error) {

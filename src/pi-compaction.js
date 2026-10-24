@@ -43,7 +43,7 @@ function activeBranch(store, session, leafId, keptId) {
 
 export function piPreparationRevision(store, session, env = process.env) {
   const policy = readPiPolicy(store.dir)
-  return policy.summaryMode === 'main-fork' ? forkHash(['pi-main-fork-tree-v2', policy]) : summarySettingsRevision(store, session, env)
+  return policy.summaryMode === 'main-fork' ? forkHash(['pi-main-fork-tree-v2', policy]) : forkHash(['pi-api-preparation-v2',policy,summarySettingsRevision(store, session, env)])
 }
 export function stagePi(store, input, { env = process.env } = {}) {
   const policy = readPiPolicy(store.dir)

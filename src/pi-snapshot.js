@@ -1,3 +1,4 @@
+import {cappedRecentKeep} from './recent-retention.js'
 import { createHash } from 'node:crypto'
 import { estimateSummaryTokens } from './summary-tokens.js'
 
@@ -26,7 +27,7 @@ export function snapshotMatches(snapshot, entries, signature) {
 export function makePiSnapshot(ctx, policy, settings = {}) {
   const entries = ctx.sessionManager.buildSessionProjection().entries
   const sizes = entries.map(e => estimateSummaryTokens(serializePiMessages(e.messages)))
-  const keep = Math.max(512, settings.compaction?.keepRecentTokens ?? 20000)
+  const keep = policy.keep === undefined ? Math.max(512, settings.compaction?.keepRecentTokens ?? 20000) : cappedRecentKeep(policy.keep, sizes.reduce((a,b)=>a+b,0))
   let retain = 0, desired = entries.length
   for (let i = entries.length - 1; i >= 0; i--) { retain += sizes[i]; if (retain >= keep) { desired = i; break } }
   if (desired === entries.length) return null

@@ -186,3 +186,36 @@ test('changing the shared DSH summary route invalidates an already opened compre
  assert.equal(rawControls(store),raw)
  assert.equal(store.harnessSetting('dsh').mode,'off')
 })
+
+test('DSH retention persists while granularity follows Settings and stale per-tool tuning cannot override it',async t=>{
+ const {store,env}=await fixture(t),initial=await dshCompressionSettings(store,{env})
+ const saved=await saveDshCompression(store,{...initial,keep:80000},{env})
+ const config=await dshConfiguration({env}),patches=config.profiles.map(p=>p.patch)
+ const old=readControls(controlsPath(store));assert.equal(old.config.keepRecentTokens,80000)
+ store.setTuning({target_tokens:10000,fanout:6})
+ const updated=readControls(controlsPath(store))
+ assert.equal(updated.config.foldBatchTokens,10000);assert.equal(updated.config.condensedMinFanout,6)
+ assert.notEqual(updated.revision,old.revision)
+ await assert.rejects(saveDshCompression(store,{...saved,keep:20000},{env}),/已变化/)
+ const current=await dshCompressionSettings(store,{env});assert.equal(current.keep,80000)
+ await saveDshCompression(store,{...current,foldBatchTokens:64000,condensedMinFanout:2},{env})
+ const actual=readControls(controlsPath(store)).config
+ assert.equal(actual.foldBatchTokens,10000);assert.equal(actual.condensedMinFanout,6);assert.equal(actual.keepRecentTokens,80000)
+ assert.deepEqual((await dshConfiguration({env})).profiles.map(p=>p.patch),patches)
+ for(const keep of [null,4999,200001,5000.5]) {
+  const before=await dshCompressionSettings(store,{env}),raw=rawControls(store)
+  await assert.rejects(saveDshCompression(store,{...before,keep},{env}),/原文保留/)
+  assert.equal(rawControls(store),raw)
+ }
+})
+
+test('integrated DSH ratio defaults match the visible 40K; legacy token retention survives smaller global chunks',async t=>{
+ const {store,env}=await fixture(t)
+ for(const budgetMode of ['ratio','tokens']) {
+  writeFileSync(controlsPath(store),JSON.stringify({format:1,revision:'legacy-without-keep',config:controlsConfig({auto:false,budgetMode,foldBatchTokens:40000,pressureFoldTokens:20000})}))
+  store.setTuning({target_tokens:10000,fanout:3})
+  const controls=readControls(controlsPath(store))
+  assert.equal(controls.config.foldBatchTokens,10000);assert.equal(controls.config.pressureFoldTokens,10000)
+  assert.equal((await dshCompressionSettings(store,{env})).keep,budgetMode==='ratio'?40000:32000)
+ }
+})

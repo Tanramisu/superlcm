@@ -23,7 +23,7 @@ test('Pi console persists the same policy and summary route consumed by the exte
   assert.equal(saved.enabled, true); assert.equal(saved.api_ref, model.id)
   assert.ok(Math.abs(saved.prepare_ratio - .7) < 1e-10)
   assert.equal(saved.summary.model, 'fixture-luna'); assert.equal(saved.summary.effort, 'high')
-  assert.deepEqual(JSON.parse(readFileSync(piPolicyPath(store.dir))), { enabled: true, ratio: .8,summaryMode:'api' })
+  assert.deepEqual(JSON.parse(readFileSync(piPolicyPath(store.dir))), { enabled: true, ratio: .8,keep:40000,summaryMode:'api' })
   assert.equal(store.harnessSetting('pi').api_ref, model.id)
   assert.throws(() => savePiCompression(store, { revision: before.revision, enabled: false, ratio: .8, summaryMode:'api', api_ref: model.id }), /已变化/)
   const changed = store.saveApiModel({ id: model.id, provider: 'openai', url: model.url, model: 'other-model' })
@@ -130,15 +130,30 @@ test('disconnecting Pi disables both policies for an already loaded extension',t
  const stopped=piCompressionSettings(store);assert.equal(stopped.enabled,false);assert.equal(stopped.summaryEnabled,false)
 })
 
-for(const concurrent of [false,true])test('saving a Pi native model preserves a pending ratio draft without absorbing concurrent ratio edits: '+concurrent,async()=>{
+for(const concurrent of [null,'ratio','keep'])test('saving a Pi native model preserves pending drafts without absorbing concurrent policy edits: '+concurrent,async()=>{
  const {runInNewContext}=await import('node:vm')
- const before={enabled:true,ratio:.8,summaryMode:'main-fork',revision:'before'}
- const fresh={...before,ratio:concurrent?.9:.8,summaryModel:'native/other',revision:'after'}
+ const before={enabled:true,ratio:.8,keep:40000,summaryMode:'main-fork',revision:'before'}
+ const fresh={...before,ratio:concurrent==='ratio'?.9:.8,keep:concurrent==='keep'?20000:40000,summaryModel:'native/other',revision:'after'}
  const context={api:async path=>{assert.equal(path,'/api/pi-compression');return fresh},t:text=>text,before}
- runInNewContext(readFileSync(new URL('../src/web-pi-controls.js',import.meta.url),'utf8')+`;renderPiControls=()=>{};piControls.value=before;piControls.draft={...before,ratio:.5,customRatio:true};globalThis.refresh=refreshPiAfterModelChange;globalThis.controls=piControls`,context)
+ runInNewContext(readFileSync(new URL('../src/web-pi-controls.js',import.meta.url),'utf8')+`;renderPiControls=()=>{};piControls.value=before;piControls.draft={...before,ratio:.5,customRatio:true,keep:80000,customKeep:false};globalThis.refresh=refreshPiAfterModelChange;globalThis.controls=piControls`,context)
  await context.refresh()
  assert.equal(context.controls.draft.ratio,.5)
  assert.equal(context.controls.draft.revision,concurrent?'before':'after')
  assert.equal(context.controls.draft.customRatio,true)
- assert.equal(!!context.controls.error,concurrent)
+ assert.equal(context.controls.draft.keep,80000)
+ assert.equal(!!context.controls.error,!!concurrent)
+})
+
+test('Pi retains custom recent originals across older clients and rejects malformed retention atomically',t=>{
+ const {store}=fixture(t)
+ const saved=savePiCompression(store,{...piCompressionSettings(store),enabled:false,keep:35000})
+ assert.equal(saved.keep,35000);assert.equal(JSON.parse(readFileSync(piPolicyPath(store.dir))).keep,35000)
+ const {keep,...legacy}=saved
+ assert.equal(savePiCompression(store,legacy).keep,35000)
+ for(const keep of [null,0,4999,200001,NaN,Infinity,5000.5,'40000']) {
+  const before=piCompressionSettings(store),raw=readFileSync(piPolicyPath(store.dir),'utf8')
+  assert.throws(()=>savePiCompression(store,{...before,keep}),/原文保留/)
+  assert.equal(readFileSync(piPolicyPath(store.dir),'utf8'),raw)
+  assert.equal(piCompressionSettings(store).revision,before.revision)
+ }
 })

@@ -4,6 +4,9 @@ const LANGS = {
   // Keys that need context to disambiguate; Chinese shows the short form.
   zh: { '关闭（摘要方式）': '关闭' },
   en: {
+    "压缩设置已变化，请重新读取后保存": "Compaction settings changed. Reload them before saving.",
+    "所有工具共用这份粒度设置。只影响之后新生成的摘要，已有摘要保持不变。": "All tools share these granularity settings. They apply to new summaries only; existing summaries stay unchanged.",
+    "最近原文保留量必须在 5K 到 200K 之间": "Keep recent originals must be between 5K and 200K tokens.",
     "摘要方式与模型在上方 Pi 卡片设置。": "Configure the summary method and model on the Pi card above.",
     "请先在工具卡片开启后台摘要": "Enable background summaries on the tool card first",
     "兼容模式：旧版后台写": "Compatibility: legacy background writer",
