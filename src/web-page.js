@@ -76,9 +76,6 @@ export function page(nonce) {
         <p class="desc">替换时最近这么多内容一字不改地留下，接着干活不丢细节；更早的才换成摘要。最多保留当前上下文的一半。</p>
         <div class="choice" id="takeoverKeep" role="radiogroup" aria-label="最近原文保留"><button type="button" role="radio" data-k="20000">20K</button><button type="button" role="radio" data-k="40000">40K<small>推荐</small></button><button type="button" role="radio" data-k="80000">80K</button><button type="button" role="radio" data-custom>自定义<small></small></button></div>
         <div class="custom-size" id="takeoverKeepCustom" hidden><input type="number" inputmode="numeric" min="5" max="200" step="5" aria-label="自定义最近原文保留"><span>K</span><button type="button" class="btn small">保存</button><span class="hint">5K–200K</span></div>
-        <h3>运行条件</h3>
-        <ul class="checks" id="takeoverChecks"></ul>
-        <details class="how"><summary>它怎么工作</summary><p>SuperLcm 平时就在后台把对话写成分层摘要，但不动 Claude Code 的上下文。到了门槛，Claude Code 要压缩时，SuperLcm 把已经被摘要覆盖的旧对话换成这些摘要，没覆盖到的部分和最近一段（按「最近原文保留」，至少两轮）一字不改地保留。</p><p>摘要还没跟上、对不上号、换完仍然太大，或者是子代理的对话，都照旧交给 Claude Code 自己压缩，对话不会因此卡住。打开时会改 Claude Code 的设置，让它正好在门槛开始压缩，由 SuperLcm 当场换上摘要；压缩比例按当前模型的可用容量计算，后台摘要始终提前 10 个百分点准备。关闭时恢复原来的设置。</p></details>
       </section>
       <section class="compression-card" id="compression-dsh" data-compression="dsh" role="tabpanel" aria-labelledby="compression-tab-dsh" hidden>
         <div class="compression-card-head"><div><span class="eyebrow">dsh harness</span><h2>DSH 压缩</h2></div><span class="state" id="dshCompressionOwner" hidden>正在读取…</span></div>

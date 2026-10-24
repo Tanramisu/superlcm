@@ -8,15 +8,13 @@ function renderPiControls() {
   const disabled = piControls.busy ? ' disabled' : ''
   const percent = Math.round(draft.ratio * 100), prepare = percent - 10
   const custom=draft.customRatio??![70,80,90].includes(percent)
-  root.innerHTML = '<label class="toggle-row"><span><b>' + t('由 SuperLcm 接管压缩') + '</b><span>' + t('关闭后使用 Pi 原生压缩，原文档案继续保留。') + '</span></span><span class="switch"><input type="checkbox" id="piControlsOn" role="switch"' + (draft.enabled ? ' checked' : '') + disabled + '><i></i></span></label>' +
+  root.innerHTML = '<label class="toggle-row"><span><b>' + t('由 SuperLcm 接管压缩') + '</b><span>' + t('开启后由 SuperLcm 压缩；关闭后使用 {tool} 原生压缩，后台摘要继续独立运行',{tool:'Pi'}) + '</span></span><span class="switch"><input type="checkbox" id="piControlsOn" role="switch"' + (draft.enabled ? ' checked' : '') + disabled + '><i></i></span></label>' +
     '<h3>' + t('压缩比例')+'</h3><p class="desc">'+t('上下文占用达到所选比例时压缩。按当前模型的可用容量计算，默认 80%。')+'</p><div class="choice" role="radiogroup" aria-label="' + t('压缩比例') + '">' + [70,80,90].map(n => '<button type="button" role="radio" data-pi-ratio="' + n + '" aria-checked="' + (!custom && percent === n) + '"' + disabled + '>' + n + '%' + (n === 80 ? '<small>' + t('推荐') + '</small>' : '') + '</button>').join('')+'<button type="button" role="radio" data-pi-ratio="custom" aria-checked="'+custom+'"'+disabled+'>'+t('自定义')+'<small>'+(custom?esc(percent)+'%':'')+'</small></button></div>' +
     '<div class="custom-size" id="piRatioCustom"'+(custom?'':' hidden')+'><input type="number" inputmode="numeric" id="piControlsRatio" aria-label="'+t('自定义压缩比例（%）')+'" min="11" max="99" step="1" value="'+esc(percent)+'"'+disabled+'><span>%</span><button type="button" class="btn small" id="piRatioSave"'+disabled+'>'+t('保存')+'</button><span class="hint">11%–99%</span></div>'+
     '<p class="notice calm" id="piPreparationHint">' + esc(t('约 {prepare}% 时在后台准备，{replace}% 时直接替换已完成摘要。', { prepare, replace: percent })) + '</p>' +
     '<div id="piForkModelSettings"></div>'+
-    '<p class="desc">' + t('摘要未就绪且空间不足时，暂停下一次模型请求。失败或输出过大时保留原文并提示处理。') + '</p>' +
-    '<p role="status" class="notice calm">' + t(value.enabled ? '接管策略已开启。已加载新版扩展的 Pi 在下一次检查时读取设置。' : '接管策略已关闭，使用 Pi 原生压缩。') + '</p>' +
     '<div class="actions"><button type="button" class="btn primary" id="piControlsSave"' + disabled + '>' + t('保存压缩设置') + '</button><button type="button" class="btn" id="piControlsRead"' + disabled + '>' + t('重新读取') + '</button><span class="saved" id="piControlsDirty"></span></div>' + (piControls.error ? '<p role="alert">' + esc(piControls.error) + '</p>' : '')
-  const badge = $('#piCompressionOwner'); badge.hidden = !value.enabled; badge.textContent = t('接管策略已开启')
+  renderCompressionOwner('#piCompressionOwner',value.enabled)
   const dirty = () => { $('#piControlsDirty').textContent = t('有未保存的修改') }
   root.querySelector('#piControlsOn').onchange = event => { draft.enabled = event.target.checked; dirty() }
   root.querySelector('#piControlsRatio').oninput = event => {

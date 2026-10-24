@@ -70,6 +70,7 @@ test('console links use the recorded port or explicit public address, never DSH 
 test('dedicated navigation, accessible tabs and DSH deep links select independent panels',()=>{
   const html=page('fixture');assert.match(html,/data-view="connect">工具/);assert.match(html,/data-view="compression">压缩/);assert.doesNotMatch(source('src/web-client.js'),/takeoverPanel/);
   assert.ok(!html.includes('data-sec="compact"'))
+  assert.doesNotMatch(html,/takeoverChecks|<h3>运行条件|<summary>它怎么工作/)
   const buttons=['claude-code','dsh'].map(tool=>({dataset:{compressionTool:tool},setAttribute(k,v){this[k]=v},focus(){this.focused=true}}))
   const panels=['claude-code','dsh'].map(tool=>({dataset:{compression:tool},hidden:false}))
   const context={state:{},document:{querySelectorAll:selector=>selector==='[data-compression-tool]'?buttons:panels,querySelector:selector=>buttons.find(b=>selector.includes(b.dataset.compressionTool))},history:{replaceState(_a,_b,hash){context.hash=hash}},dshControls:{value:{},loading:false},renderDshControls(){context.loaded=true},act(){throw Error('unexpected API call')},$(){return null}}
@@ -111,6 +112,8 @@ test('closing and stale-version owners remain pending until current engine and a
   engine.version='new';context.admin.compression.runtimes.push({kind:'archive',live:true,version:'new',pid:2,profile:'web'})
   runInNewContext(status+'dshSettingsStatus()',context);assert.equal(badge.pending,true)
   context.admin.compression.runtimes[1].pid=1;runInNewContext(status+'dshSettingsStatus()',context);assert.equal(badge.pending,false)
+  context.$=selector=>selector==='#dshCompressionOwner'?node:null
+  engine.version='old';runInNewContext(status+'dshSettingsStatus()',context);assert.equal(badge.pending,true)
 })
 
 test('bundle re-enable only resumes archiving and never opts into compaction',()=>{

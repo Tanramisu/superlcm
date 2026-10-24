@@ -15,6 +15,8 @@ const LANGS = {
     "独立摘要模型（高级）": "Independent summary model (advanced)",
     "使用已保存的 API 模型": "Use a saved API model",
     "设置接管": "Configure compaction",
+    "Pi 原生压缩": "Pi native compaction",
+    '开启后由 SuperLcm 压缩；关闭后使用 {tool} 原生压缩，后台摘要继续独立运行': 'When enabled, SuperLcm compacts context. When disabled, {tool} uses native compaction while background summaries continue independently.',
     '全局接入一次，自动在 DSH 插件列表注册 SuperLcm，无需单独安装插件。摘要方式在工具卡片设置。': 'Connect once to register the bundled SuperLcm plugin in DSH automatically. Configure background summaries on the Tools page.',
     '接入完成。重新加载 dsh harness 后，插件列表会显示 SuperLcm；点击「后台设置」管理摘要与压缩。': 'Connected. Reload dsh harness to see SuperLcm in Plugins. Open Console settings to manage summaries and compaction.',
     "后台准备": "Background preparation",

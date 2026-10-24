@@ -352,17 +352,7 @@ function renderTakeover(x) {
   markSize('#takeoverRatio','r',percent)
   $('#claudePreparationHint').textContent=t('约 {prepare}% 时在后台准备，{replace}% 时直接替换已完成摘要。',{prepare:percent-10,replace:percent})
   markSize('#takeoverKeep', 'k', x.keep)
-  const c = state.harnesses?.find(h => h.harness === 'claude-code')?.claude, items = []
-  if (!c) {const absent=state.harnesses?.find(h=>h.harness==='claude-code')?.detected===false;items.push([absent?'no':'wait',absent?t('本机未检测到')+' Claude Code':t('正在检查 Claude Code…')])}
-  else {
-    items.push(c.plugin?.enabled ? ['ok', t('SuperLcm 插件已启用 · v{v}', { v: esc(c.plugin.version) })] : ['no', t('还没装 SuperLcm 插件，接管要靠它') + ' <button type="button" class="link" data-goto-connect>' + t('去安装') + '</button>'])
-    for (const [name, v, ok] of moduleSupport(c)) items.push(ok ? ['ok', t('{name} Claude Code {v} 支持接管', { name, v: esc(v) })] : ['no', t('{name} Claude Code {v} 还不支持，要 {min} 或更新；它更新后自动生效', { name, v: esc(v), min: c.modules_min })])
-  }
-  const mode = admin.settings?.settings.find(s => s.harness === 'claude-code')?.mode
-  items.push(mode === 'off' ? ['no', t('Claude Code 的摘要是关闭的，没有摘要就只能交回 Claude Code 压缩')] : ['ok', t('Claude Code 的摘要：{m}', { m: esc(writerLabel(mode || 'agent')) })])
-  items.push(['info',t('约 {prepare}% 时在后台准备，{replace}% 时直接替换已完成摘要。',{prepare:percent-10,replace:percent})])
-  $('#takeoverChecks').innerHTML = items.map(([cls, text]) => '<li class="' + cls + '">' + text + '</li>').join('')
-  $('#takeoverChecks').querySelector('[data-goto-connect]')?.addEventListener('click', () => show('connect'))
+
 }
 async function loadCompression() {
   if(admin.outdated) return

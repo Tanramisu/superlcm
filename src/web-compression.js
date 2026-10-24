@@ -31,7 +31,7 @@ function renderCompressionOwner(id,enabled,pending=false) {
   const badge=$(id);if(!badge)return
   badge.hidden=!enabled&&!pending
   badge.className='state '+(pending?'warn':enabled?'warn':'on')
-  badge.textContent=t(pending?'等待应用':enabled?'SuperLcm 接管':id==='#claudeCompressionOwner'?'Claude 原生压缩':'DSH 原生压缩')
+  badge.textContent=t(pending?'等待应用':enabled?'SuperLcm 接管':id==='#claudeCompressionOwner'?'Claude 原生压缩':id==='#piCompressionOwner'?'Pi 原生压缩':'DSH 原生压缩')
 }
 
 const nativeForkModels=new Map()
