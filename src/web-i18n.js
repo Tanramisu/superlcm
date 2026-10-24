@@ -15,6 +15,8 @@ const LANGS = {
     "独立摘要模型（高级）": "Independent summary model (advanced)",
     "使用已保存的 API 模型": "Use a saved API model",
     "设置接管": "Configure compaction",
+    '全局接入一次，自动在 DSH 插件列表注册 SuperLcm，无需单独安装插件。摘要方式在工具卡片设置。': 'Connect once to register the bundled SuperLcm plugin in DSH automatically. Configure background summaries on the Tools page.',
+    '接入完成。重新加载 dsh harness 后，插件列表会显示 SuperLcm；点击「后台设置」管理摘要与压缩。': 'Connected. Reload dsh harness to see SuperLcm in Plugins. Open Console settings to manage summaries and compaction.',
     "后台准备": "Background preparation",
   "约 70% 时一次生成分块与上层摘要。": "Generate chunks and upper-level summaries once at about 70%.",
   "约 {prepare}% 时一次生成分块与上层摘要。": "Generate chunks and upper-level summaries once at about {prepare}%.",

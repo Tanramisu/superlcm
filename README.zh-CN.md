@@ -25,7 +25,7 @@ SuperLcm 让 **Claude Code、Codex、Pi 和 dsh harness** 共用一座存放在�
 
 默认每段约20,000个估算 token、每层四个子节点，整棵树只用一次模型响应，核验原文、完整性和预算后一起保存。实际缓存读写以供应商回执为准。详见[架构与验证边界](docs/MAIN-FORK.md)。
 
-先从 [安装包说明](docs/RELEASE.md) 安装，运行 `superlcm web`，在「工具」页选择工具即可。Claude Code 用户也可 [安装 Claude 插件](#安装成-claude-插件)，用 `/superlcm:console` 打开控制台。dsh harness 用户完成全局接入后重新加载 dsh harness，默认沿用当前对话模型和账号；独立摘要 API 作为高级选项保留。见 [接入说明](docs/DSH.md)。
+先从 [安装包说明](docs/RELEASE.md) 安装，运行 `superlcm web`，在「工具」页选择工具即可。Claude Code 用户也可 [安装 Claude 插件](#安装成-claude-插件)，用 `/superlcm:console` 打开控制台。DSH 插件已内置于 SuperLcm，无需单独下载或安装 dsh-superlcm。完成全局接入后重新加载 dsh harness，即可在其「插件」列表看到 SuperLcm。后台摘要默认沿用当前对话模型和账号，独立摘要 API 作为高级选项保留。见 [接入说明](docs/DSH.md)。
 
 0.5.11 起，后台摘要、Claude 和 DSH 的压缩摘要统一保留决策变更、理由、授权边界、工具失败及历史来源。旧摘要不会自动重算；原文仍是查证依据。见 [摘要语义规则与验收边界](docs/SUMMARY-SEMANTICS-0.5.11.md)。
 
@@ -123,7 +123,7 @@ Claude、Claude Code、Codex、Pi 的名称和标志归各自所有者，这里�
 
 摘要语言和指令隔离修复见 [新版说明](docs/SUMMARY-QUALITY-0.5.24.md)。
 
-完整版与 DSH 独立版的关系、修复同步及验证范围见 [修复同步说明](docs/REPAIR-SYNC-0.5.23.md)。
+DSH 统一使用主包内置的插件接入，安装与旧独立插件迁移见 [DSH 接入说明](docs/DSH.md)。
 
 Claude 接管的真实宿主验证与社区修复见 [Claude 接管可靠性说明](docs/CLAUDE-RELIABILITY.md)。
 
