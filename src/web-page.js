@@ -55,11 +55,13 @@ export function page(nonce) {
   <section class="view page" id="view-compression" hidden>
     <div class="page-inner compression-inner">
       <div class="page-h"><h1>压缩</h1><p>默认约 70% 在后台准备整棵摘要树；支持接管的工具约 80% 替换已完成摘要，保留后来追加的原文。Codex 使用原生压缩，SuperLcm 仅生成后台摘要。</p></div>
-      <div class="compression-tabs" role="tablist" aria-label="压缩工具">
-        <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true">Claude Code</button>
-        <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false">dsh harness</button>
-        <button type="button" id="compression-tab-pi" role="tab" data-compression-tool="pi" aria-controls="compression-pi" aria-selected="false">Pi</button>
+      <div class="compression-layout">
+      <div class="compression-tabs" role="tablist" aria-label="压缩工具" aria-orientation="vertical">
+        <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true"><span class="compression-marker" aria-hidden="true"></span><span class="hmark" aria-hidden="true">${icons['claude-code']}</span><span>Claude Code</span></button>
+        <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false"><span class="compression-marker" aria-hidden="true"></span><span class="hmark" aria-hidden="true">${icons['dsh']}</span><span>dsh harness</span></button>
+        <button type="button" id="compression-tab-pi" role="tab" data-compression-tool="pi" aria-controls="compression-pi" aria-selected="false"><span class="compression-marker" aria-hidden="true"></span><span class="hmark" aria-hidden="true">${icons['pi']}</span><span>Pi</span></button>
       </div>
+      <div class="compression-content">
       <section class="compression-card" id="compression-claude-code" data-compression="claude-code" role="tabpanel" aria-labelledby="compression-tab-claude">
         <div class="compression-card-head"><div><span class="eyebrow">Claude Code</span><h2>Claude 压缩</h2></div><span class="state" id="claudeCompressionOwner" hidden>正在读取…</span></div>
         <p class="desc">Claude Code 的对话太长时会压缩。交给 SuperLcm 后，旧的部分换成后台写好的摘要，最近几轮原样留下，原文随时能用 lcm_read 调回。</p>
@@ -88,6 +90,8 @@ export function page(nonce) {
         <p class="desc">提前在后台准备摘要，到门槛直接替换，完整原文随时可查。空间不足时暂停模型请求，保护对话。</p>
         <div id="piCompressionSettings"><p class="muted">正在读取压缩设置…</p></div>
       </section>
+      </div>
+      </div>
     </div>
   </section>
 
