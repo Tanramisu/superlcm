@@ -117,3 +117,14 @@ test('preset compaction must inherit the host; hidden native pruning prevents a 
   assert.equal(patched.config.plugins[0].config[0].id,'command-compact')
   assert.equal(rows[0].config.length,3)
 })
+
+test('an account adapter with an empty host catalog cannot block archive setup',async()=>{
+  const {readDshCatalog}=await import('../src/dsh-catalog.js')
+  class Context{fiber={dispose:async()=>{}}}
+  class Llm{constructor(ctx){ctx.llm={listProviders:()=>[{id:'deepseek-account'}],listConfigurableProviders:()=>[{provider:'deepseek-account',displayName:'DeepSeek account'}],listModels:async()=>[]}}}
+  const requested=[]
+  const catalog=await readDshCatalog({profiles:[{name:'default',tree:[{name:'@deepseek-ai/dsh-llm-deepseek-account',config:{}}]}]},
+    {loadModule:async name=>{requested.push(name);if(name==='@deepseek-ai/cordis')return {Context};if(name==='@deepseek-ai/dsh-llm')return {default:Llm};if(name==='@deepseek-ai/dsh-llm-deepseek-account')return {Config:value=>value,apply(){}};throw Error('Unexpected catalog fallback')}})
+  assert.equal(catalog.providers.length,1);assert.deepEqual(catalog.providers[0].models,[])
+  assert.ok(!requested.includes('@deepseek-ai/dsh-llm-deepseek'))
+})
