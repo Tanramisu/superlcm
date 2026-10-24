@@ -157,8 +157,8 @@ button:disabled { cursor: default }
 .page-inner.compression-inner { max-width:1240px }
 .compression-inner > .page-h { width:100%;max-width:800px;justify-self:center }
 .compression-layout { display:grid;grid-template-columns:minmax(164px,1fr) minmax(0,800px) minmax(164px,1fr);gap:16px;align-items:start }
-.compression-tabs { display:flex;flex-direction:column;align-self:start;width:164px;justify-self:end }
-.compression-tabs button { display:grid;grid-template-columns:10px 30px minmax(0,1fr);align-items:center;gap:10px;min-height:78px;padding:16px 0;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:var(--ink2);text-align:left;font-weight:500;transition:color .15s }
+.compression-tabs { display:flex;flex-direction:column;align-self:start;width:164px;justify-self:end;transform:translateX(-24px) }
+.compression-tabs button { display:grid;grid-template-columns:10px 30px minmax(0,1fr);align-items:center;gap:10px;min-height:78px;padding:16px 0;border:0;border-radius:0;background:transparent;color:var(--ink2);text-align:left;font-weight:500;transition:color .15s }
 .compression-tabs button:hover,.compression-tabs button[aria-selected="true"] { color:var(--ink) }
 .compression-tabs button[aria-selected="true"] { font-weight:600 }
 .compression-tabs button:focus-visible { outline:2px solid var(--accent);outline-offset:3px;border-radius:4px }
@@ -166,7 +166,7 @@ button:disabled { cursor: default }
 .compression-tabs button:hover .compression-marker,.compression-tabs button:focus-visible .compression-marker { background:var(--accent);border-color:var(--accent) }
 .compression-tabs .hmark { width:30px;height:30px }
 .compression-content { grid-column:2;width:100%;max-width:800px;min-width:0;justify-self:center }
-@media(max-width:900px) { .compression-layout { grid-template-columns:minmax(0,1fr);gap:24px }.compression-tabs { width:100%;max-width:800px;justify-self:center }.compression-tabs button { min-height:56px;padding:10px 0 }.compression-content { grid-column:1 } }
+@media(max-width:900px) { .compression-layout { grid-template-columns:minmax(0,1fr);gap:24px }.compression-tabs { width:100%;max-width:800px;justify-self:center;transform:none }.compression-tabs button { min-height:56px;padding:10px 0 }.compression-content { grid-column:1 } }
 @media(prefers-reduced-motion:reduce) { .compression-marker,.compression-tabs button { transition:none } }
 .compression-card { background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:28px }
 .compression-card-head { display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px }
