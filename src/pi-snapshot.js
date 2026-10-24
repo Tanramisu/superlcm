@@ -51,7 +51,7 @@ export function makePiSnapshot(ctx, policy, settings = {}) {
     session_id: ctx.sessionManager.getSessionId(), session_file: ctx.sessionManager.getSessionFile(),
     leafId: ctx.sessionManager.getLeafId(), firstKeptEntryId: entries[cut].sourceEntry.id,
     tokensBefore: ctx.getContextUsage()?.tokens || sizes.reduce((a, b) => a + b, 0), source, protectedRequest,
-    ...(policy.summaryMode === "main-fork" ? {sourceMessages: messages,sourceEntryIds:entries.slice(0,cut).flatMap(e=>e.messages.map(()=>e.sourceEntry.id)),summaryTuning:{targetTokens:policy.targetTokens||20000,fanout:policy.fanout||4}} : {}),
+    ...(policy.summaryMode === "main-fork" ? {summaryModel:policy.summaryModel||null,sourceMessages: messages,sourceEntryIds:entries.slice(0,cut).flatMap(e=>e.messages.map(()=>e.sourceEntry.id)),summaryTuning:{targetTokens:policy.targetTokens||20000,fanout:policy.fanout||4}} : {}),
     prefixDigest: snapshotPrefix(entries, cut), signature: piSignature(ctx, policy, settings),
   }
   snapshot.draftKey = piDigest([snapshot.session_id, snapshot.firstKeptEntryId, snapshot.prefixDigest, snapshot.signature])

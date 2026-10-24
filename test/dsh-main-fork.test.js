@@ -90,3 +90,46 @@ test('a settings change during native generation fences archive publication',asy
  const unregister=registerForkArchive(path,async()=>{saved++},()=>revision)
  try{const snapshot=forkArchiveSnapshot(path);revision='after';await assert.rejects(publishForkArchive(path,'s',[],{},snapshot),/配置已变化/);assert.equal(saved,0)}finally{unregister()}
 })
+
+test('DSH 50% policy prepares at 40% and uses an optional native model only on its background branch',async()=>{
+ const {automaticRatios}=await import('../dsh/ratio-policy.js')
+ const h=await lab({capacity:64000,config:{summaryMode:'main-fork',forkModelOverride:true,...automaticRatios(.5),summarizationProvider:'lab-main',summarizationModel:'summary-alternate'}})
+ try{
+  const original=h.ctx.llm.stream.bind(h.ctx.llm),branches=[]
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches.push(options)
+   const directive=options.messages.at(-1).content.map(b=>b.text||'').join('')
+   const plan=JSON.parse(directive.split('\n').find(line=>line.startsWith('[{"index":')))
+   yield {type:'text-delta',index:0,text:JSON.stringify({blocks:plan.map(n=>({index:n.index,summary:'# Historical state\nRetain all constraints. Work remains pending.'}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  history(h,.32);await send(h,'BELOW_40_PERCENT');await h.engine.settleBackgroundFold(h.agent)
+  assert.equal(branches.length,0)
+  const policy=h.engine.resolvedPolicies.get(h.agent),used=h.ctx.tokenMeter.measure(h.agent.session).totalTokens
+  assert.ok(used<policy.prepareActiveTokens)
+  const target=(policy.prepareActiveTokens+policy.softActiveTokens)/2
+  history(h,Math.max(0,target-used)/(h.capacity-2048),{pieces:2});await send(h,'PREPARE_ABOVE_40_PERCENT');await h.engine.settleBackgroundFold(h.agent)
+  assert.equal(branches.length,1,h.warnings.join('\n'));assert.equal(branches[0].model,'summary-alternate')
+  assert.equal(h.agent.options.model,'main-64000');assert.equal(count(h,'compaction/summary'),0)
+  assert.deepEqual(branches[0].messages.slice(0,-1),h.engine.mainRequests.get(h.agent).request.messages)
+  await send(h,'LATER_INPUT '+ 't'.repeat(20000))
+  assert.equal(count(h,'compaction/summary'),1,h.warnings.join('\n'))
+  assert.equal(branches.length,1,'replacement must reuse the prepared tree')
+  assert.equal(h.engine.mainRequests.get(h.agent).request.model,'main-64000')
+ }finally{await close(h)}
+})
+
+test('DSH rejects an auxiliary model that cannot hold the complete branch and preserves originals',async()=>{
+ const {automaticRatios}=await import('../dsh/ratio-policy.js')
+ const h=await lab({capacity:64000,config:{summaryMode:'main-fork',forkModelOverride:true,...automaticRatios(.5),summarizationProvider:'lab-main',summarizationModel:'main-8000'}})
+ try{
+  let branches=0;const original=h.ctx.llm.stream.bind(h.ctx.llm)
+  h.ctx.llm.stream=options=>{if(forkScope.getStore())branches++;return original(options)}
+  history(h,.42);const originals=h.agent.session.surface.nodes.slice()
+  await send(h,'KEEP_INPUT_WHEN_SUMMARY_MODEL_IS_TOO_SMALL');await h.engine.settleBackgroundFold(h.agent)
+  assert.equal(branches,0);assert.equal(count(h,'compaction/summary'),0)
+  assert.ok(originals.every(seq=>h.agent.session.surface.nodes.includes(seq)))
+  assert.equal(h.agent.options.model,'main-64000')
+  assert.ok(h.warnings.some(message=>message.includes('输入空间')))
+ }finally{await close(h)}
+})

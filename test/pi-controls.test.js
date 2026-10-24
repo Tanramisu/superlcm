@@ -51,7 +51,7 @@ test('a newer writer before lock acquisition makes the older page stale', t => {
 })
 test('invalid routes and ratios cannot partly save a Pi takeover policy', t => {
   const { store, model } = fixture(t), before = piCompressionSettings(store)
-  for (const fields of [{ ratio: .99 }, { api_ref: null }, { api_ref: 'missing' }, { enabled: 'true' }]) {
+  for (const fields of [{ ratio: 1 }, { api_ref: null }, { api_ref: 'missing' }, { enabled: 'true' }]) {
     assert.throws(() => savePiCompression(store, { ...before, summaryMode:'api', api_ref: model.id, enabled: true, ...fields }))
     assert.deepEqual(piCompressionSettings(store), before); assert.equal(store.harnessSetting('pi'), null)
   }
@@ -128,4 +128,17 @@ test('disconnecting Pi disables both policies for an already loaded extension',t
  savePiCompression(store,{revision:before.revision,enabled:true,ratio:.8})
  store.setIntegrationEnabled('pi',false)
  const stopped=piCompressionSettings(store);assert.equal(stopped.enabled,false);assert.equal(stopped.summaryEnabled,false)
+})
+
+for(const concurrent of [false,true])test('saving a Pi native model preserves a pending ratio draft without absorbing concurrent ratio edits: '+concurrent,async()=>{
+ const {runInNewContext}=await import('node:vm')
+ const before={enabled:true,ratio:.8,summaryMode:'main-fork',revision:'before'}
+ const fresh={...before,ratio:concurrent?.9:.8,summaryModel:'native/other',revision:'after'}
+ const context={api:async path=>{assert.equal(path,'/api/pi-compression');return fresh},t:text=>text,before}
+ runInNewContext(readFileSync(new URL('../src/web-pi-controls.js',import.meta.url),'utf8')+`;renderPiControls=()=>{};piControls.value=before;piControls.draft={...before,ratio:.5,customRatio:true};globalThis.refresh=refreshPiAfterModelChange;globalThis.controls=piControls`,context)
+ await context.refresh()
+ assert.equal(context.controls.draft.ratio,.5)
+ assert.equal(context.controls.draft.revision,concurrent?'before':'after')
+ assert.equal(context.controls.draft.customRatio,true)
+ assert.equal(!!context.controls.error,concurrent)
 })

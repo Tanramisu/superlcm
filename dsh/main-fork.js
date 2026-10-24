@@ -9,6 +9,8 @@ import { prepareAsyncRegion } from './async-region.js'
 import { appendRecallEnvelope } from './marker.js'
 import { completeSummaryStream } from './summary-session.js'
 import { summaryAttempt } from './summary-attempt.js'
+import {forkRoute} from './fork-route.js'
+import {abortable} from './summary-attempt.js'
 import { currentPolicy } from './ratio-runtime.js'
 import { draftNode, assembleTree } from './draft-tree.js'
 import { forkDirective, forkAnchors, forkHash, parseForkTree } from './fork-summary.js'
@@ -29,7 +31,11 @@ export async function summarizeMainFork(engine, agent, prepared, signal) {
   if (!Number.isFinite(policy?.inputBudget)) throw Error('主模型分支需要按模型容量管理压缩')
   const indexed = reindexSession(engine.superLcmStore,agent.session)
   if (indexed.errors.length) throw Error('DSH 原文归档未完成')
-  const request = capture.request, byId = new Map(request.messages.map((message,index)=>[message.id,{message,index}]))
+  const route=await summaryAttempt(async abort=>{
+    if(engine.rollingConfig.forkModelOverride)await abortable(engine.summaryModelReady,abort)
+    return forkRoute(engine.rollingConfig.forkModelOverride?(engine.summaryContext||engine.ctx):engine.ctx,capture.request,{enabled:engine.rollingConfig.forkModelOverride,provider:engine.config.summarizationProvider,model:engine.config.summarizationModel},abort)
+  },signal,15000)
+  const request = route.request, byId = new Map(request.messages.map((message,index)=>[message.id,{message,index}]))
   const parts = []; let from = 0, tokens = 0
   for (let i = 0; i < prepared.shadowedSeqs.length; i++) {
     tokens += prepared.selectedNodes[i].tokens
@@ -50,12 +56,12 @@ export async function summarizeMainFork(engine, agent, prepared, signal) {
   const language=dshSummaryLanguage(agent.session)
   const directive = forkDirective(plan,target,language.name,treeOptions)
   const directiveTokens = engine.ctx.tokenMeter.estimateMessage(createUserMessage({content:[{type:'text',text:directive}]}))
-  if (prepared.activeTokens + directiveTokens >= policy.inputBudget - 1024) throw Error('DSH 后台分支没有足够输入空间，原文保留')
+  if (prepared.activeTokens + directiveTokens >= Math.min(policy.inputBudget,route.inputBudget??Infinity) - 1024) throw Error('DSH 后台分支没有足够输入空间，原文保留')
   const options = {...request,messages:[...request.messages,createUserMessage({content:[{type:'text',text:directive}]})]}
   const archiveSnapshot=forkArchiveSnapshot(engine.superLcmStore.path)
   const raw = [], usage = {}; let text = ''
   await withForkLease(engine.superLcmStore.path,agent.session.id,policy.signature||'main-fork',signal,leasedSignal=>summaryAttempt(abort=>forkScope.run(true,async()=>{
-    for await (const chunk of completeSummaryStream(engine.ctx.llm.stream({...options,signal:abort}),abort)) {
+    for await (const chunk of completeSummaryStream(route.ctx.llm.stream({...options,signal:abort}),abort)) {
       raw.push(chunk)
       if (chunk.type === 'text-delta') text += chunk.text
       if (chunk.type === 'usage') Object.assign(usage,chunk.usage)

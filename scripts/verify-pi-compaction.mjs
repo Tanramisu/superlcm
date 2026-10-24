@@ -12,6 +12,8 @@ import { savePiPolicy } from '../src/pi-compaction-policy.js'
 import { readApiKey, saveApiKey } from '../src/api-credentials.js'
 import { findCli } from '../src/runtime.js'
 const mainFork = process.argv.includes('--main-fork')
+const otherModel=process.argv.includes('--other-model'), ratio50=process.argv.includes('--ratio50')
+assert.ok(!(otherModel||ratio50)||mainFork,'native model/ratio fixtures require --main-fork')
 const passive = process.argv.includes('--passive-only')
 const live = process.argv.includes('--live-luna'), dir = mkdtempSync(join(tmpdir(), 'superlcm-pi-background-'))
 const slow = process.argv.includes('--slow-luna'), fail = process.argv.includes('--fail-luna'), cold = process.argv.includes('--cold-input')
@@ -60,7 +62,7 @@ try {
     }else{
       mainPayloads.push(body);mainCalls++;mainStartedResolve();tool=mainCalls< (slow?2:3)
       if(mainCalls=== (slow?2:3)){if(!passive)assert.ok(swapEntry);assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'));assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))}
-      tokens=mainCalls===1?(slow||fail||badSummary?95000:79000):tool?81000:1100
+      tokens=mainCalls===1?(slow||fail||badSummary?95000:(ratio50?49000:79000)):tool?(ratio50?51000:81000):1100
       content=tool?null:'合成测试正常结束。'
     }
     const delta=tool?{role:'assistant',tool_calls:[{index:0,id:'call-'+mainCalls,type:'function',function:{name:'background_checkpoint',arguments:'{}'}}]}:{role:'assistant',content}
@@ -93,14 +95,14 @@ try {
     model = archive.saveApiModel({ provider: 'openai', model: 'fixture-luna', url: `http://127.0.0.1:${server.address().port}/v1`, effort: 'high' })
   }
   archive.setHarnessSetting('pi', 'api', null, null, null, model.id); archive.setIntegrationEnabled('pi', true)
-  savePiPolicy(archive, { enabled: !passive, ratio: 0.8, ...(mainFork?{summaryMode:'main-fork'}:{}) })
+  savePiPolicy(archive, { enabled: !passive, ratio: ratio50?.5:.8, ...(mainFork?{summaryMode:'main-fork'}:{}) })
   writeFileSync(join(agentDir, 'extensions/superlcm.ts'), piExtension({ node: process.execPath, script: fileURLToPath(new URL('../src/cli.js', import.meta.url)), home: archive.dir }))
   if(nativeFault)writeFileSync(join(agentDir,'extensions/00-native-fault.ts'), `export default function(pi){pi.on('before_provider_request',event=>({...event.payload,${nativePayload?"tools:[{type:'function',function:{name:'oversized_tool',description:'中'.repeat(120000),parameters:{type:'object',properties:{}}}}]":"max_tokens:90000"}}))}`)
   const manager = sdk.SessionManager.create(cwd, sessions)
   const usage = tokens => ({ input: tokens - 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
   for (let i = 0; i < 8; i++) {
     manager.appendMessage({ role: 'user', content: `请检查第 ${i} 处。部署必须另行获得用户明确授权。` + '保留准确路径和失败原因。'.repeat(40), timestamp: Date.now() })
-    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: `第 ${i} 处尚未结束。` + '路径为 /tmp/synthetic-project，工具结果回查原文。'.repeat(12) }], api: 'openai-completions', provider: 'fixture-main', model: 'scripted-main', usage: usage(cold ? 95000 : 70000), stopReason: 'stop', timestamp: Date.now() })
+    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: `第 ${i} 处尚未结束。` + '路径为 /tmp/synthetic-project，工具结果回查原文。'.repeat(12) }], api: 'openai-completions', provider: 'fixture-main', model: 'scripted-main', usage: usage(cold ? 95000 : ratio50?40000:70000), stopReason: 'stop', timestamp: Date.now() })
   }
   const original = readFileSync(manager.getSessionFile(), 'utf8')
   const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1, keepRecentTokens: 512 }, enableAnalytics: false, enableInstallTelemetry: false })
@@ -108,8 +110,9 @@ try {
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, [])
   const modelsFile=join(agentDir,'models.json')
   if(mainFork){
-    writeFileSync(modelsFile,JSON.stringify({providers:{'fixture-main':{baseUrl:`http://127.0.0.1:${mainServer.address().port}/v1`,api:'openai-completions',apiKey:'synthetic-no-credential',models:[{id:'scripted-main',name:'Scripted main',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}))
+    writeFileSync(modelsFile,JSON.stringify({providers:{'fixture-main':{baseUrl:`http://127.0.0.1:${mainServer.address().port}/v1`,api:'openai-completions',apiKey:'synthetic-no-credential',models:[...(otherModel?[{id:'scripted-summary',name:'Scripted summary',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]:[]),{id:'scripted-main',name:'Scripted main',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}))
   }
+  if(otherModel)archive.setHarnessSetting('pi','main-fork','fixture-main/scripted-summary')
   const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: mainFork?modelsFile:null, refreshOnCreate: false })
   // Isolated scripted provider: no real credential or chat endpoint is used.
   const hasAuth = modelRuntime.hasConfiguredAuth.bind(modelRuntime)
@@ -149,7 +152,7 @@ try {
     }
     assert.ok(mainCalls <= finalCall, 'tool chain must continue naturally, without extra injected turns')
     const message = fauxAssistantMessage(mainCalls < finalCall ? [fauxToolCall('background_checkpoint', {}, { id: 'call-' + mainCalls })] : '合成测试正常结束。', { stopReason: mainCalls < finalCall ? 'toolUse' : 'stop' })
-    Object.assign(message, { usage: usage(mainCalls === 1 ? (slow || fail ? 95000 : 79000) : mainCalls === finalCall ? 1100 : 81000), provider: 'fixture-main', model: 'scripted-main' })
+    Object.assign(message, { usage: usage(mainCalls === 1 ? (slow || fail ? 95000 : (ratio50?49000:79000)) : mainCalls === finalCall ? 1100 : (ratio50?51000:81000)), provider: 'fixture-main', model: 'scripted-main' })
     const stream = createAssistantMessageEventStream()
     queueMicrotask(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: message.stopReason, message }); stream.end(message) })
     return stream
@@ -180,16 +183,17 @@ try {
     assert.equal(branchPayloads.length,1);assert.equal(apiCalls,1)
     const branch=branchPayloads[0], main=mainPayloads[0]
     assert.deepEqual(branch.messages.slice(0,-1),main.messages)
-    assert.deepEqual({...branch,messages:[]},{...main,messages:[]})
+    assert.deepEqual({...branch,messages:[],model:undefined},{...main,messages:[],model:undefined})
+    assert.equal(branch.model,otherModel?'scripted-summary':'scripted-main');assert.equal(main.model,'scripted-main')
     assert.equal(swapEntry.details.providerUsage.cacheRead,256)
   }
-  assert.ok(swapEntry); assert.equal(swapEntry.details.backgroundPrepared, true); assert.equal(swapEntry.details.model, mainFork?'scripted-main':model.model)
+  assert.ok(swapEntry); assert.equal(swapEntry.details.backgroundPrepared, true); assert.equal(swapEntry.details.model, mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model)
   assert.equal(swapEntry.details.replacementModelCalls, 0); assert.equal(swapEntry.fromExtension ?? swapEntry.fromHook, true)
   if (!live && !slow) assert.equal(swapApiCalls - readyApiCalls, 0, 'replacement must not call the summary API')
   assert.equal(mainCalls, slow ? 2 : 3); assert.ok(readFileSync(manager.getSessionFile(), 'utf8').startsWith(original))
   assert.ok(archive.eventRows(key).map(row => archive.exact(key, row.ordinal)).join('').startsWith(original))
-  const receipt = { ok: true, directory: dir, installedPi: JSON.parse(readFileSync(join(packageRoot, 'package.json'))).version, backgroundAt: '70%', replacedAt: '80%', mainContinuedDuringPreparation: true,
-    mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal', uninterruptedMainTurns: mainCalls, summaryModel: mainFork?'scripted-main':model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
+  const receipt = { ok: true, directory: dir, installedPi: JSON.parse(readFileSync(join(packageRoot, 'package.json'))).version, backgroundAt: ratio50?'40%':'70%', replacedAt: ratio50?'50%':'80%', mainContinuedDuringPreparation: true,
+    mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal', uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
     nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true }
   writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
   }

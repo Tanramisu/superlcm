@@ -134,3 +134,10 @@ test('Claude preparation precedes a separately configured replacement threshold'
  assert.equal(forkPreparationThreshold(store,'s',200000),140000)
  store.metadata=()=>({harness:'codex'});assert.equal(forkPreparationThreshold(store,'s',1000000),700000)
 })
+
+ test('Claude optional summary model is passed only to the fork invocation',async()=>{
+  let selected
+  const spawnProcess=fake((child,args)=>{selected=args;child.stdin.on('finish',()=>{emit(child,{type:'result',subtype:'success',result:'complete summary',model:'chosen'});child.exitCode=0;child.emit('close',0)})})
+  const result=await summarizeClaudeFork('source','summary directive',{env,model:'chosen',spawnProcess})
+  assert.ok(selected.includes('--fork-session'));assert.equal(selected[selected.indexOf('--model')+1],'chosen');assert.equal(result.model,'chosen')
+ })

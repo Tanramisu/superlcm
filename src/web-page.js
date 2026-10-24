@@ -21,6 +21,7 @@ export function page(nonce) {
     <nav class="nav" aria-label="主菜单">
       <button type="button" data-view="conversations">对话</button>
       <button type="button" data-view="connect">工具</button>
+      <button type="button" data-view="compression">压缩</button>
       <button type="button" data-view="settings">设置</button>
     </nav>
     <div class="spacer"></div>
@@ -45,7 +46,7 @@ export function page(nonce) {
 
   <section class="view page" id="view-connect" hidden>
     <div class="page-inner">
-      <div class="page-h"><h1>工具</h1><p>统一管理归档、后台摘要与可选压缩接管。主模型后台分支沿用当前会话的模型和账户，一次生成分块与上层摘要。</p></div>
+      <div class="page-h"><h1>工具</h1><p>统一管理归档、后台摘要与可选压缩接管。主模型后台分支默认沿用当前会话的模型和账户，一次生成分块与上层摘要。</p></div>
       <div class="tools" id="tools"></div>
       <p class="page-note">导入：接入之前的旧对话，可以从本机记录中挑选导入。只读取你选中的对话，不会调用模型。</p>
     </div>
@@ -53,7 +54,7 @@ export function page(nonce) {
 
   <section class="view page" id="view-compression" hidden>
     <div class="page-inner compression-inner">
-      <div class="page-h"><h2>可选压缩接管</h2><p>默认约 70% 在后台准备整棵摘要树；支持接管的工具约 80% 替换已完成摘要，保留后来追加的原文。Codex 使用原生压缩，SuperLcm 仅生成后台摘要。</p></div>
+      <div class="page-h"><h1>压缩</h1><p>默认约 70% 在后台准备整棵摘要树；支持接管的工具约 80% 替换已完成摘要，保留后来追加的原文。Codex 使用原生压缩，SuperLcm 仅生成后台摘要。</p></div>
       <div class="compression-tabs" role="tablist" aria-label="压缩工具">
         <button type="button" id="compression-tab-claude" role="tab" data-compression-tool="claude-code" aria-controls="compression-claude-code" aria-selected="true">Claude Code</button>
         <button type="button" id="compression-tab-dsh" role="tab" data-compression-tool="dsh" aria-controls="compression-dsh" aria-selected="false">dsh harness</button>
@@ -63,17 +64,19 @@ export function page(nonce) {
         <div class="compression-card-head"><div><span class="eyebrow">Claude Code</span><h2>Claude 压缩</h2></div><span class="state" id="claudeCompressionOwner" hidden>正在读取…</span></div>
         <p class="desc">Claude Code 的对话太长时会压缩。交给 SuperLcm 后，旧的部分换成后台写好的摘要，最近几轮原样留下，原文随时能用 lcm_read 调回。</p>
         <label class="toggle-row"><span><b>由 SuperLcm 接管压缩</b><span>到门槛时直接换上现成的摘要，不调用模型，几乎不用等</span></span><span class="switch"><input type="checkbox" id="takeoverOn" role="switch"><i></i></span></label>
-        <h3>压缩门槛</h3>
-        <p class="desc">上下文到这个大小，SuperLcm 换上摘要；模型窗口放不下时自动调低。</p>
-        <div class="choice" id="takeoverWindow" role="radiogroup" aria-label="压缩门槛"><button type="button" role="radio" data-w="200000">200K</button><button type="button" role="radio" data-w="300000">300K<small>推荐</small></button><button type="button" role="radio" data-w="500000">500K</button><button type="button" role="radio" data-w="800000">800K</button><button type="button" role="radio" data-custom>自定义<small></small></button></div>
-        <div class="custom-size" id="takeoverWindowCustom" hidden><input type="number" inputmode="numeric" min="100" max="950" step="10" aria-label="自定义压缩门槛"><span>K</span><button type="button" class="btn small">保存</button><span class="hint">100K–950K</span></div>
+        <h3>压缩比例</h3>
+        <p class="desc">上下文占用达到所选比例时压缩。按当前模型的可用容量计算，默认 80%。</p>
+        <div class="choice" id="takeoverRatio" role="radiogroup" aria-label="压缩比例"><button type="button" role="radio" data-r="70">70%</button><button type="button" role="radio" data-r="80">80%<small>推荐</small></button><button type="button" role="radio" data-r="90">90%</button><button type="button" role="radio" data-custom>自定义<small></small></button></div>
+        <div class="custom-size" id="takeoverRatioCustom" hidden><input type="number" inputmode="numeric" min="11" max="99" step="1" aria-label="自定义压缩比例（%）"><span>%</span><button type="button" class="btn small">保存</button><span class="hint">11%–99%</span></div>
+        <p class="notice calm" id="claudePreparationHint"></p>
+        <div id="claudeForkModelSettings"></div>
         <h3>最近原文保留</h3>
         <p class="desc">替换时最近这么多内容一字不改地留下，接着干活不丢细节；更早的才换成摘要。最多保留当前上下文的一半。</p>
         <div class="choice" id="takeoverKeep" role="radiogroup" aria-label="最近原文保留"><button type="button" role="radio" data-k="20000">20K</button><button type="button" role="radio" data-k="40000">40K<small>推荐</small></button><button type="button" role="radio" data-k="80000">80K</button><button type="button" role="radio" data-custom>自定义<small></small></button></div>
         <div class="custom-size" id="takeoverKeepCustom" hidden><input type="number" inputmode="numeric" min="5" max="200" step="5" aria-label="自定义最近原文保留"><span>K</span><button type="button" class="btn small">保存</button><span class="hint">5K–200K</span></div>
         <h3>运行条件</h3>
         <ul class="checks" id="takeoverChecks"></ul>
-        <details class="how"><summary>它怎么工作</summary><p>SuperLcm 平时就在后台把对话写成分层摘要，但不动 Claude Code 的上下文。到了门槛，Claude Code 要压缩时，SuperLcm 把已经被摘要覆盖的旧对话换成这些摘要，没覆盖到的部分和最近一段（按「最近原文保留」，至少两轮）一字不改地保留。</p><p>摘要还没跟上、对不上号、换完仍然太大，或者是子代理的对话，都照旧交给 Claude Code 自己压缩，对话不会因此卡住。打开时会改 Claude Code 的设置，让它正好在门槛开始压缩，由 SuperLcm 当场换上摘要；它显示的窗口是门槛再加 100K（最多 1M）。关闭时恢复原来的设置。</p></details>
+        <details class="how"><summary>它怎么工作</summary><p>SuperLcm 平时就在后台把对话写成分层摘要，但不动 Claude Code 的上下文。到了门槛，Claude Code 要压缩时，SuperLcm 把已经被摘要覆盖的旧对话换成这些摘要，没覆盖到的部分和最近一段（按「最近原文保留」，至少两轮）一字不改地保留。</p><p>摘要还没跟上、对不上号、换完仍然太大，或者是子代理的对话，都照旧交给 Claude Code 自己压缩，对话不会因此卡住。打开时会改 Claude Code 的设置，让它正好在门槛开始压缩，由 SuperLcm 当场换上摘要；压缩比例按当前模型的可用容量计算，后台摘要始终提前 10 个百分点准备。关闭时恢复原来的设置。</p></details>
       </section>
       <section class="compression-card" id="compression-dsh" data-compression="dsh" role="tabpanel" aria-labelledby="compression-tab-dsh" hidden>
         <div class="compression-card-head"><div><span class="eyebrow">dsh harness</span><h2>DSH 压缩</h2></div><span class="state" id="dshCompressionOwner" hidden>正在读取…</span></div>

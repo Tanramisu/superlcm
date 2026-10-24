@@ -236,7 +236,7 @@ export function summaryEstimate(store, session, options={}) {
 }
 export function summarySettingsRevision(store, session, env = process.env) {
   const setting = store.effectiveSetting(session, env)
-  return hash(JSON.stringify([setting,store.tuning(),store.integrationRevision(setting.harness), setting.mode === 'api' ? store.apiCredential(session, env) : null]))
+  return hash(JSON.stringify([setting,store.tuning(),store.integrationRevision(setting.harness),setting.mode==='main-fork'&&setting.harness==='claude-code'?store.takeover():null, setting.mode === 'api' ? store.apiCredential(session, env) : null]))
 }
 export async function buildHierarchy(store, session, { model, apiKey, baseURL, apiURL, apiProvider, effort = null, batchSize = segmentMessages(), targetChars, targetTokens, fanout = store.tuning().fanout, summarize = summarizeWithModel, fetchImpl, shouldContinue = null, leaseDurationMs = 330000, leaseHeartbeatMs = 30000, retryFailed = false, leafOnly = false, maxPieces = Infinity, signal, runId = null } = {}) {
   if (!model || (apiKey == null && summarize === summarizeWithModel)) throw new Error('Explicit summarizer model and API key required')

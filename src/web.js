@@ -1,3 +1,6 @@
+import {readControls} from '../dsh/controls-config.js'
+import {controlsPath} from './dsh-controls.js'
+import {saveForkModel} from './fork-model-controls.js'
 import { applyTakeover, claudeCompactWindow } from './takeover.js'
 import { claudePluginEnabled } from './runtime.js'
 import { createServer } from 'node:http'
@@ -139,12 +142,16 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'POST /api/setup-apply': async req => { const x = await body(req); if (x.confirm !== true) throw Error('请先预览并确认接入'); return applySetup(store, x.harness, x.revision, { env,provider_ref:x.provider_ref,provider:x.provider,model:x.model, approveHooks: x.approve_hooks === true }) },
     'POST /api/disconnect-preview': async req=>{const x=await body(req);return publicPreview(await disconnectPreview(store,x.harness,{env}))},
     'POST /api/disconnect-apply': async req=>{const x=await body(req);if(x.confirm!==true)throw Error('请先预览并确认取消接入');return applyDisconnect(store,x.harness,x.revision,{env})},
+    'POST /api/fork-model': async req=>saveForkModel(store,await body(req),{catalog,env}),
     'GET /api/models': url => catalog(url.searchParams.get('backend'), { env }),
     // Kept fast: no tool detection here, so saving a choice on a card answers at once.
     'GET /api/settings': async () => {
       const settings = store.harnessSettings().filter(x=>x.harness!=='hermes')
+      let dshRatio=.8
+      try{dshRatio=readControls(controlsPath(store))?.config.switchRatio??.8}catch{dshRatio=null}
       return {
         global: { ...(store.globalSetting() || { mode: summaryMode(env), model: null, api_provider: null, api_url: null, configured: false }), api_key_configured: store.hasApiCredential('global') },
+        compression_ratios:{dsh:dshRatio},
         index_home: store.dir,
         settings: settings.map(x => ({ ...x, api_key_configured: store.hasApiCredential(store.harnessKeyScope(x.harness, x)) })),
         api_models: store.apiModels().map(m => ({ ...m, key_configured: store.hasApiCredential('model:' + m.id), used_by: settings.filter(x => x.api_ref === m.id).map(x => x.harness) })),
@@ -174,7 +181,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
       return { ...saved, key_configured: store.hasApiCredential('model:' + saved.id), tested: x.skip_test !== true }
     },
     // 接管压缩 on/off and its size; turning it on also sets Claude Code's autoCompactWindow (see src/takeover.js).
-    'POST /api/takeover': async req => { const x = await body(req); const r = applyTakeover(store, { enabled: x.enabled === true, window: x.window === undefined ? undefined : Number(x.window), keep: x.keep === undefined ? undefined : Number(x.keep) }, env); return { ...r, previous: undefined, plugin: claudePluginEnabled(env) } },
+    'POST /api/takeover': async req => { const x = await body(req); const r = applyTakeover(store, { enabled: x.enabled === true, ratio: x.ratio, window: x.window === undefined ? undefined : Number(x.window), keep: x.keep === undefined ? undefined : Number(x.keep) }, env); return { ...r, previous: undefined, plugin: claudePluginEnabled(env) } },
     'POST /api/api-models/delete': async req => { const x = await body(req); return { deleted: store.deleteApiModel(x.id) } },
     'POST /api/settings': async req => {
       const x = await body(req)

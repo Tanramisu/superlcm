@@ -23,7 +23,7 @@ SuperLCM 默认沿用主模型及账号，在后台分支一次写出分块、�
 
 ## 配置
 
-本地后台打开 `http://127.0.0.1:8791/#connect`，在 Pi 卡片选择“主模型后台分支”。关闭压缩接管仍会独立保存后台摘要；需要替换上下文时，再展开“可选压缩接管 → Pi”启用，默认80%。
+本地后台打开 `http://127.0.0.1:8791/#connect`，在 Pi 卡片选择“主模型后台分支”。关闭压缩接管仍会独立保存后台摘要；需要替换上下文时，再到“压缩 → Pi”启用，默认80%。自定义比例11%–99%，摘要始终提前10个百分点准备，例如50%替换对应40%准备。开启“允许其他模型”可从 Pi 自己的供应商和模型列表选择后台模型；聊天模型不变。
 
 ```sh
 node src/cli.js setup pi --apply
@@ -33,10 +33,12 @@ node src/cli.js pi-policy
 
 高级独立 API 模式可显式传入 `--summary-mode api --api-ref <已保存模型编号>`。关闭接管不会删除摘要方式。主模型分支不需要独立模型凭据；配置有误时不自动改用 API。
 
-主请求从 Pi 公开的 `context_with_system` 和 `before_provider_request` 接口捕获。分支通过同一个模型注册表发送，保留请求设置、工具和缓存控制；后台不会执行工具。替换入口 `pi-ready` 与 `session_before_compact` 只有查询和安装路径。
+主请求从 Pi 公开的 `context_with_system` 和 `before_provider_request` 接口捕获。分支通过同一个模型注册表发送，默认保留请求设置、工具和缓存控制；选择其他模型时使用该模型的原生请求转换和容量检查；后台不会执行工具。替换入口 `pi-ready` 与 `session_before_compact` 只有查询和安装路径。
 
 ## 验证范围
 
 `npm run test:pi` 检查来源映射、工具闭合、失效、容量保护和事务。`node scripts/verify-pi-compaction.mjs --main-fork` 使用本机 Pi SDK 和本地假供应商，验证70%后台准备、主工具链继续、80%原生边界替换、零替换阶段摘要请求，以及新增用户和工具原文保留。此项已在 Pi 1.4.0 验证，不代表实际供应商缓存命中率；用量回执才是缓存证据。
 
 本轮容量、慢响应、异常摘要、重试和切换边界的实测见[故障审查记录](SAFETY-AUDIT-20261024.md)。
+
+自定义比例与其他模型的真实 SDK 验证：`node scripts/verify-pi-compaction.mjs --main-fork --other-model --ratio50`。

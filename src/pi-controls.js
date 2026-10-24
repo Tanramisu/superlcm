@@ -6,7 +6,7 @@ export function piCompressionSettings(store) {
   const policy = readPiPolicy(store.dir,store.db), setting = store.harnessSetting('pi')
   const models = store.apiModels()
   const revision = createHash('sha256').update(JSON.stringify([policy, setting, models])).digest('hex')
-  return { ...policy, prepare_ratio: Math.max(.1, policy.ratio - .1), api_ref: setting?.mode === 'api' ? setting.api_ref : null,
+  return { ...policy, prepare_ratio: Math.round((policy.ratio-.1)*1e12)/1e12, api_ref: setting?.mode === 'api' ? setting.api_ref : null,
     revision, models, summary: setting?.mode === 'api' ? { model: setting.model, effort: setting.api_effort || null } : null }
 }
 
@@ -17,7 +17,7 @@ export function savePiCompression(store, input) {
   try {
     const before = piCompressionSettings(store)
     if (input.revision !== before.revision) throw Error('Pi 压缩设置已变化，请重新读取')
-    if (typeof input.enabled !== 'boolean' || !Number.isFinite(input.ratio) || input.ratio < .5 || input.ratio > .95) throw Error('Pi 压缩比例必须在50%到95%之间')
+    if (typeof input.enabled !== 'boolean' || !Number.isFinite(input.ratio) || input.ratio < .11 || input.ratio > .99) throw Error('Pi 压缩比例必须在11%到99%之间')
     const apiRef=input.api_ref===undefined?before.api_ref:input.api_ref
     if (apiRef !== null && (typeof apiRef !== 'string' || !store.apiModel(apiRef))) throw Error('请选择已保存的摘要 API 模型')
     const summaryMode = input.summaryMode ?? (input.api_ref?'api':before.summaryMode) ?? 'main-fork'

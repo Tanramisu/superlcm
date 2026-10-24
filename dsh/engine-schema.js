@@ -25,6 +25,7 @@ export const engineSchema = z.object({
     summarizationModel: z.string().default('').volatile(),
     fallbackSummarizationProvider: z.string().default('').volatile(),
     fallbackSummarizationModel: z.string().default('').volatile(),
+    forkModelOverride:z.boolean().default(false).volatile(),
     summaryMode: z.string().default('api').volatile(),
     budgetMode: z.string().default(ROLLING_DEFAULTS.budgetMode).volatile(),
     prepareRatio:z.number().min(0.01).max(0.98).default(0.7).volatile(),

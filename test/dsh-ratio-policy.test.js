@@ -72,6 +72,6 @@ test('legal early thresholds shrink automatic retention and summary budgets too'
 
 test('one compaction threshold arranges preparation and safety automatically',()=>{
   assert.deepEqual(automaticRatios(.8),{prepareRatio:.7,switchRatio:.8,emergencyRatio:.9})
-  for(const ratio of [.01,.7,.85,.9,.99]){const x=automaticRatios(ratio);assert.equal(x.switchRatio,ratio);assert.ok(x.prepareRatio>0&&x.prepareRatio<ratio);assert.ok(x.emergencyRatio>ratio&&x.emergencyRatio<1)}
-  for(const ratio of [0,1,NaN,Infinity,'0.8'])assert.throws(()=>automaticRatios(ratio),/压缩比例/)
+  for(const ratio of [.11,.5,.7,.85,.9,.99]){const x=automaticRatios(ratio);assert.equal(x.switchRatio,ratio);assert.ok(x.prepareRatio>0&&x.prepareRatio<ratio);assert.ok(x.emergencyRatio>ratio&&x.emergencyRatio<1)}
+  for(const ratio of [0,.1,1,NaN,Infinity,'0.8'])assert.throws(()=>automaticRatios(ratio),/压缩比例/)
 })

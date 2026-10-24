@@ -49,22 +49,17 @@ function overlay(html, bind) {
 }
 
 /* ---------- navigation ---------- */
-const views = ['conversations', 'connect', 'settings']
-const takeoverPanel=document.createElement('details');takeoverPanel.id='takeoverPanel';takeoverPanel.className='takeover-panel'
-takeoverPanel.innerHTML='<summary>'+t('可选压缩接管')+'</summary>'
-const embeddedCompression=$('#view-compression');embeddedCompression.className='tool-compression';embeddedCompression.hidden=false
-takeoverPanel.append(embeddedCompression);$('#view-connect .page-inner').append(takeoverPanel)
+const views = ['conversations', 'connect', 'compression', 'settings']
 function show(view, updateHash = true) {
   const parts=String(view).split('/')
   view=parts[0]
   if(view==='settings'&&parts[1]==='compact')view='compression'
   const compact=view==='compression'
-  if(compact)view='connect'
   if (!views.includes(view)) view = 'conversations'
   state.view = view
   for (const b of document.querySelectorAll('.nav button')) b.dataset.view === view ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current')
   for (const v of views) $('#view-' + v).hidden = v !== view
-  if(compact){takeoverPanel.open=true;takeoverPanel.scrollIntoView({block:'start'});compressionSection(['dsh','pi','claude-code'].includes(parts[1])?parts[1]:state.compressionTool||'claude-code',false)}
+  if(compact){compressionSection(['dsh','pi','claude-code'].includes(parts[1])?parts[1]:state.compressionTool||'claude-code',false)}
   if (updateHash) history.replaceState(null, '', '#' + (compact?'compression/'+state.compressionTool:view))
 }
 for (const b of document.querySelectorAll('.nav button')) b.onclick = () => show(b.dataset.view)

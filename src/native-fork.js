@@ -26,9 +26,10 @@ function launch(bin,args,{env,signal,spawnProcess=spawn,timeoutMs=180000},onLine
   })
   return {child,done}
 }
-export async function summarizeClaudeFork(session,prompt,{env=process.env,...options}={}){
+export async function summarizeClaudeFork(session,prompt,{env=process.env,model,...options}={}){
   let result
   const args=['--resume',session,'--fork-session','--print','--output-format','stream-json','--verbose','--max-turns','1','--settings',JSON.stringify({hooks:forkGuard()})]
+  if(model)args.push('--model',model)
   const run=launch(findCli('claude',env),args,{env,...options},(item,stop)=>{
     if(item.type==='assistant'&&item.message?.content?.some(b=>b.type==='tool_use'))return stop(Error('摘要分支请求了工具，结果未保存'))
     if(item.type==='result'){

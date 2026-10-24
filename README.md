@@ -21,7 +21,7 @@ This README describes the current `main` branch. The background-branch changes h
 
 All four connections use **main-model background branches** by default. The branch inherits the active model and account and returns a complete tree in one response: granular source summaries, parent summaries and a continuation root. Explicit independent API configurations and “off” remain unchanged. In-conversation summary-writing tools have been retired.
 
-The console navigation is **Conversations → Tools → Settings**. Each tool card selects the summary method; optional compaction settings expand under Tools. Around 70% of a known context budget, background preparation starts. Pi and DSH can install the prepared root around 80%, retaining recent and newly appended originals. Codex retains native compaction. Claude's optional takeover uses its configured threshold, with preparation ahead of that threshold. Unknown context capacity never triggers a speculative automatic branch.
+The console navigation is **Conversations → Tools → Compression → Settings**. Each tool card selects the summary method; the Compression page configures Claude Code, Pi and DSH takeover. A replacement ratio always starts preparing 10 percentage points earlier: 50% replacement means 40% preparation. Default: 80%/70%. Enable “Allow another model” to choose from that harness’s native model catalog; the chat model stays unchanged. Around 70% of a known context budget, background preparation starts. Pi and DSH can install the prepared root around 80%, retaining recent and newly appended originals. Codex retains native compaction. Claude uses a percentage of its native capacity; legacy absolute thresholds remain compatible until a new ratio is saved. Unknown context capacity never triggers a speculative automatic branch.
 
 Source granularity defaults to about 20,000 estimated tokens, with four adjacent children per parent. Every level is requested in the same response and atomically saved after source and completeness checks. Cache hits are measured from provider usage, never guaranteed. See [architecture and verification](docs/MAIN-FORK.md).
 
@@ -81,7 +81,7 @@ A summary is a guide to the archive. When an old deployment port or decision mat
 
 The default is **main-model background branch**, using the current conversation model and account. Summary preparation and compaction takeover have independent controls. Claude Code, Codex, Pi and dsh all support background summaries; Claude Code, Pi and dsh additionally offer optional takeover. An independent API model remains an advanced choice, and summaries can be turned off.
 
-Use the tool card to choose the writer. Expand optional compaction on the same Tools page to configure takeover. Importing historical sessions calls no model. Disconnecting preserves stored originals and summaries; reload existing sessions afterwards.
+Use the tool card to choose the writer. Open **Compression** to configure ratios and optional native background models. Importing historical sessions calls no model. Disconnecting preserves stored originals and summaries; reload existing sessions afterwards.
 
 ## Compaction vs. an archive
 
@@ -111,7 +111,7 @@ Plugin updates replace the plugin folder, so tools connected from the plugin's c
 
 Open `http://127.0.0.1:8791/` (no login; it only listens on this computer), then:
 
-1. **工具 (Tools)** — connect a harness and choose the summary method. The default branch follows the current model and account. Expand optional compaction here to configure Claude Code, Pi or dsh takeover. Reload existing host sessions after changing integration code.
+1. **工具 (Tools)** — connect a harness and choose the summary method. The default branch follows the current model and account. Use **Compression** to configure Claude Code, Pi or dsh takeover, preparation ratios and optional native background models. Reload existing host sessions after changing integration code.
 2. **对话 (Conversations)** — browse, search and read stored conversations and their summary trees. Use **换个工具继续** to hand a task to another tool.
 3. **设置 (Settings)** — tune source granularity and parent width, and manage advanced API models.
 

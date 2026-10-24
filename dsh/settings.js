@@ -20,7 +20,7 @@ export function readSettings(home){
   const summary=sharedSummary(home),file=join(home,'dsh-compression.json')
   const controls=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):null,config=controls?.config||{}
   return {revision:forkHash([summary,controls]),settings:{summaryEnabled:summary.mode==='main-fork',summaryMode:'main-fork',takeover:!!config.auto&&summary.mode==='main-fork',
-    chunkTokens:summary.tuning.target_tokens||Math.floor((summary.tuning.target_chars||80000)/4),fanout:summary.tuning.fanout||4,compressionRatio:config.switchRatio||.8}}
+    forkModelOverride:config.forkModelOverride===true,summaryProvider:config.summarizationProvider||'',summaryModel:config.summarizationModel||'',summaryAdapter:config.summaryAdapter||null,chunkTokens:summary.tuning.target_tokens||Math.floor((summary.tuning.target_chars||80000)/4),fanout:summary.tuning.fanout||4,compressionRatio:config.switchRatio||.8}}
 }
 export function sharedControls(file,document){
   const summary=sharedSummary(dirname(file)),mode=summary.mode===null?(document.config.summaryMode||'api'):summary.mode==='main-fork'?'main-fork':'api'

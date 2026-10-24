@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {ClaudeStore} from '../src/store.js'
 import {dshSetupPreview,applyDshSetup} from '../src/dsh-setup.js'
-import {dshCompressionSettings,saveDshCompression,controlsPath} from '../src/dsh-controls.js'
+import {dshCompressionSettings,saveDshCompression,controlsPath,rawControls} from '../src/dsh-controls.js'
 import {dshConfiguration} from '../src/dsh-catalog.js'
 import {dshEntries,inspectDshTree} from '../src/dsh-connection.js'
 import {controlsConfig,readControls} from '../dsh/controls-config.js'
@@ -68,7 +68,7 @@ test('console links use the recorded port or explicit public address, never DSH 
   assert.match(source('dsh/ui/client.js'),/target.search=''/)
 })
 test('dedicated navigation, accessible tabs and DSH deep links select independent panels',()=>{
-  const html=page('fixture');assert.match(html,/data-view="connect">工具/);assert.doesNotMatch(html,/data-view="compression"/);assert.match(source('src/web-client.js'),/takeoverPanel/);
+  const html=page('fixture');assert.match(html,/data-view="connect">工具/);assert.match(html,/data-view="compression">压缩/);assert.doesNotMatch(source('src/web-client.js'),/takeoverPanel/);
   assert.ok(!html.includes('data-sec="compact"'))
   const buttons=['claude-code','dsh'].map(tool=>({dataset:{compressionTool:tool},setAttribute(k,v){this[k]=v},focus(){this.focused=true}}))
   const panels=['claude-code','dsh'].map(tool=>({dataset:{compression:tool},hidden:false}))
@@ -164,9 +164,18 @@ test('DSH ownership reminder is hidden while off and visible for takeover or a s
 
 test('Claude ownership badge is visible only while takeover is enabled',()=>{
   const badge={},context={$:()=>badge,t:x=>x}
-  const code=source('src/web-compression.js').slice(source('src/web-compression.js').indexOf('function renderCompressionOwner'))
+  const code=source('src/web-compression.js').slice(source('src/web-compression.js').indexOf('function renderCompressionOwner'),source('src/web-compression.js').indexOf('const nativeForkModels'))
   runInNewContext(code+'renderCompressionOwner("#claudeCompressionOwner",false)',context);assert.equal(badge.hidden,true)
   runInNewContext(code+'renderCompressionOwner("#claudeCompressionOwner",true)',context);assert.equal(badge.hidden,false)
   assert.equal(badge.textContent,'SuperLcm 接管')
   assert.match(page('fixture'),/id="claudeCompressionOwner" hidden/)
+})
+
+test('changing the shared DSH summary route invalidates an already opened compression form',async t=>{
+ const {store,env}=await fixture(t)
+ const before=await dshCompressionSettings(store,{env}),raw=rawControls(store)
+ store.setHarnessSetting('dsh','off')
+ await assert.rejects(saveDshCompression(store,{...before,enabled:false},{env}),/已变化/)
+ assert.equal(rawControls(store),raw)
+ assert.equal(store.harnessSetting('dsh').mode,'off')
 })

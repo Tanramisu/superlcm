@@ -110,6 +110,7 @@ export class ClaudeStore {
     const deliveryColumns=new Set(this.db.prepare('PRAGMA table_info(deliveries)').all().map(c=>c.name))
     if(!new Set(this.db.prepare('PRAGMA table_info(leases)').all().map(c=>c.name)).has('owner'))this.db.exec("ALTER TABLE leases ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
     if(!new Set(this.db.prepare('PRAGMA table_info(takeover_settings)').all().map(c=>c.name)).has('keep_tokens'))this.db.exec('ALTER TABLE takeover_settings ADD COLUMN keep_tokens INTEGER NOT NULL DEFAULT 40000')
+    if(!new Set(this.db.prepare('PRAGMA table_info(takeover_settings)').all().map(c=>c.name)).has('compression_ratio'))this.db.exec('ALTER TABLE takeover_settings ADD COLUMN compression_ratio REAL')
     if(!deliveryColumns.has('issued_via'))this.db.exec('ALTER TABLE deliveries ADD COLUMN issued_via TEXT')
     if(!deliveryColumns.has('delivery_route'))this.db.exec("ALTER TABLE deliveries ADD COLUMN delivery_route TEXT NOT NULL DEFAULT 'hook'")
     // Existing alpha.5 indexes have only (session,harness); preserve every row.
@@ -216,10 +217,10 @@ export class ClaudeStore {
   }
   preference(session) {return this.db.prepare('SELECT mode,model FROM summary_preferences WHERE session=?').get(session)||{mode:'auto',model:null}}
   // Legacy conversation preferences remain in SQLite for migration; routing ignores them.
-  validateSetting(mode,model,apiProvider=null,apiURL=null) {
+  validateSetting(mode,model,apiProvider=null,apiURL=null,{allowForkModel=false}={}) {
     if (!['off','cli','api','main-fork'].includes(mode) || (model!==null && (typeof model!=='string' || !(mode==='api'?validApiModel(model):validModel(model))))) throw new Error('Invalid summary setting or model ID')
     if(mode==='api') {if(!model)throw new Error('Custom API requires an explicit model ID');return {api_provider:apiProvider,api_url:normalizeApiEndpoint(apiProvider,apiURL)}}
-    if (['off','main-fork'].includes(mode) && model!==null) throw new Error('This summary mode does not use a model')
+    if ((mode==='off'||mode==='main-fork'&&!allowForkModel) && model!==null) throw new Error('This summary mode does not use a model')
     return {api_provider:null,api_url:null}
   }
   // Granularity applies to batches planned from now on; saved nodes keep their original ranges.
@@ -241,10 +242,11 @@ export class ClaudeStore {
   // summaries, the Stop hook does not start a separate `claude -p` for it.
   hostWriter(session) { return Boolean(this.db.prepare('SELECT 1 FROM host_writers WHERE session=? AND until_ms>?').get(session,Date.now())) }
   setHostWriter(session,on,duration=6*3600000) { if(on)this.db.prepare('INSERT INTO host_writers(session,until_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET until_ms=excluded.until_ms').run(session,Date.now()+duration); else this.db.prepare('DELETE FROM host_writers WHERE session=?').run(session) }
-  takeover() { const r=this.db.prepare('SELECT enabled,window,previous,keep_tokens FROM takeover_settings WHERE id=1').get(); return r?{enabled:Boolean(r.enabled),window:r.window,keep:r.keep_tokens,previous:r.previous}:{...takeoverDefaults,previous:null} }
-  setTakeover({enabled,window=this.takeover().window,keep=this.takeover().keep,previous=this.takeover().previous}) {
+  takeover() { const r=this.db.prepare('SELECT enabled,window,previous,keep_tokens,compression_ratio FROM takeover_settings WHERE id=1').get(); return r?{enabled:Boolean(r.enabled),window:r.window,keep:r.keep_tokens,previous:r.previous,...(r.compression_ratio!=null?{ratio:r.compression_ratio}:{})}:{...takeoverDefaults,previous:null} }
+  setTakeover({enabled,ratio=this.takeover().ratio??null,window=this.takeover().window,keep=this.takeover().keep,previous=this.takeover().previous}) {
     if (typeof enabled!=='boolean' || !Number.isSafeInteger(window) || window<takeoverLimits.window[0] || window>takeoverLimits.window[1] || !Number.isSafeInteger(keep) || keep<takeoverLimits.keep[0] || keep>takeoverLimits.keep[1]) throw new Error('Unsupported compaction takeover setting')
-    this.db.prepare('INSERT INTO takeover_settings(id,enabled,window,previous,keep_tokens) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,window=excluded.window,previous=excluded.previous,keep_tokens=excluded.keep_tokens').run(enabled?1:0,window,previous,keep)
+    if(ratio!==null&&(!Number.isFinite(ratio)||ratio<.11||ratio>.99))throw Error('压缩比例必须在 11% 到 99% 之间')
+    this.db.prepare('INSERT INTO takeover_settings(id,enabled,window,previous,keep_tokens,compression_ratio) VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,window=excluded.window,previous=excluded.previous,keep_tokens=excluded.keep_tokens,compression_ratio=excluded.compression_ratio').run(enabled?1:0,window,previous,keep,ratio)
     return this.takeover()
   }
   // The newest packet SuperLcm handed Claude Code for a conversation, so the SessionStart hook after the
@@ -322,7 +324,7 @@ export class ClaudeStore {
     if(harness==='hermes')throw Error('Unsupported harness')
     this.harnessSetting(harness)
     if(apiRef!==null){const m=this.apiModel(apiRef);if(mode!=='api'||!m)throw new Error('Unknown API model');[model,apiProvider,apiURL]=[m.model,m.provider,m.url]}
-    const api=this.validateSetting(mode,model,apiProvider,apiURL)
+    const api=this.validateSetting(mode,model,apiProvider,apiURL,{allowForkModel:['pi','claude-code'].includes(harness)})
     this.db.prepare('INSERT INTO harness_summary_settings(harness,mode,model,api_provider,api_url,api_ref) VALUES(?,?,?,?,?,?) ON CONFLICT(harness) DO UPDATE SET mode=excluded.mode,model=excluded.model,api_provider=excluded.api_provider,api_url=excluded.api_url,api_ref=excluded.api_ref').run(harness,mode,model,api.api_provider,api.api_url,apiRef)
     return this.harnessSetting(harness)
   }

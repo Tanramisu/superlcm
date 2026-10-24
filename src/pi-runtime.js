@@ -84,7 +84,7 @@ export function registerPiCompaction(pi, options, {
       if (!p.enabled&&!p.summaryEnabled) { stop(); status(ctx, undefined); return }
       if (state && !valid(ctx)) stop()
       if (retrySignature && retrySignature !== signature(ctx)) clearRetries()
-      if (state || Date.now() < retryAfter || (!force && !reached(ctx, Math.max(0.1, p.ratio - 0.1)))) return
+      if (state || Date.now() < retryAfter || (!force && !reached(ctx, Math.round((p.ratio-.1)*1e12)/1e12))) return
       if (p.summaryMode === 'main-fork' && !capture) return
       const snapshot = makeSnapshot(ctx, p, settings())
       if (!snapshot) return

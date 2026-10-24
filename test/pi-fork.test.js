@@ -8,7 +8,7 @@ const second={role:'assistant',content:[{type:'text',text:'Inspection pending.'}
 const messages=[{role:'system',content:'System',toolsAdded:[{name:'read',parameters:{type:'object'}}]},first,second]
 const payload={model:'fixture',messages:[{role:'system',content:'System'},{role:'user',content:first.content},{role:'assistant',content:'Inspection pending.'}],tools:[{type:'function',function:{name:'read'}}],max_tokens:2048,prompt_cache_key:'main-session',temperature:.2}
 const snapshot={session_id:'main-session',sourceMessages:[first,second],source:'source',tokensBefore:10000}
-const capture={payload,messages,model:{provider:'fixture',id:'fixture'},reasoning:'high'}
+const capture={payload,messages,model:{provider:'fixture',id:'fixture',contextWindow:1000000,maxTokens:2048},reasoning:'high'}
 test('Pi branch replays exact provider prefix/settings and stages originals before one model call',async()=>{
  let staged=false,calls=0,wire
  const ctx={model:capture.model,modelRegistry:{streamSimple(model,context,options){

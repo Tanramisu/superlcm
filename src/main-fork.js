@@ -22,6 +22,7 @@ export function nativeContextUsage(store,session,provided={}){
 }
 export function forkPreparationThreshold(store,session,window){
   const policy=store.takeover()
+  if(store.metadata(session).harness==='claude-code'&&policy.ratio!=null)return window*Math.round((policy.ratio-.1)*1e12)/1e12
   return store.metadata(session).harness==='claude-code'&&policy.enabled?Math.min(window*.7,policy.window*.7/.8):window*.7
 }
 function anchor(raw){
@@ -95,7 +96,7 @@ export async function generateMainFork(store,session,{runId,signal,shouldContinu
   try{
     if(!valid())throw Error('后台分支配置已变化')
     for(const row of plan.originals){store.exact(session,row.ordinal);if(store.db.prepare('SELECT digest FROM events WHERE session=? AND ordinal=?').get(session,row.ordinal)?.digest!==row.digest)throw Error('后台分支原文已变化')}
-    const result=await summarize(meta.harness,meta.conversation_id,forkDirective(plan.leaves,plan.targetTokens,plan.language.name,{fanout:plan.fanout}),{env,signal:combined})
+    const result=await summarize(meta.harness,meta.conversation_id,forkDirective(plan.leaves,plan.targetTokens,plan.language.name,{fanout:plan.fanout}),{env,signal:combined,...(store.harnessSetting(meta.harness)?.mode==='main-fork'&&store.harnessSetting(meta.harness)?.model?{model:store.harnessSetting(meta.harness).model}:{})})
     combined.throwIfAborted()
     const tree=parseForkTree(result.text,plan.leaves,plan.language,{fanout:plan.fanout,targetTokens:plan.targetTokens})
     const ids=saveForkTree(store,session,plan,tree,{...result,owner,validate:valid})

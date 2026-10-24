@@ -1,3 +1,6 @@
+import {forkRoute} from './fork-route.js'
+import {summaryContext} from './summary-model.js'
+import {abortable} from './summary-attempt.js'
 import {ArchiveDatabase} from './archive-db.js'
 // Passive archive summaries use the same one-response tree contract as takeover.
 // This module never changes a session surface or invokes a compaction method.
@@ -35,11 +38,11 @@ export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=fa
   signal=AbortSignal.any([signal,AbortSignal.timeout(180000)])
   const request=service.forkRequests.get(id),session=service.ctx.sessions.get(id)
   if(!request||!session)return 'awaiting-live-request'
-  const info=await service.ctx.llm.resolveModelInfo(request.provider,request.model,signal)
+  const info=await abortable(service.ctx.llm.resolveModelInfo(request.provider,request.model,signal),signal)
   const window=info.context?.contextWindow,reserve=request.maxTokens??info.defaultMaxTokens??0
   if(!Number.isSafeInteger(window)||window<=reserve)throw Error('聊天模型缺少上下文容量，原文保留')
   const inputBudget=window-reserve,measurement=service.ctx.tokenMeter.measure(session)
-  if(!force&&measurement.totalTokens<inputBudget*Math.max(.1,doc.settings.compressionRatio-.1))return 'below-preparation-threshold'
+  if(!force&&measurement.totalTokens<inputBudget*(Math.round((doc.settings.compressionRatio-.1)*1e12)/1e12))return 'below-preparation-threshold'
   const byId=new Map(request.messages.map((message,index)=>[message.id,{message,index}]))
   const covered=new Set(service.db.nodes(id).filter(n=>n.level===0).flatMap(n=>n.sources))
   const selected=service.db.sourceRows(id).filter(row=>{
@@ -59,16 +62,23 @@ export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=fa
   }
   if(!leaves.length)return 'awaiting-tool-results'
   const language=detectSummaryLanguage(selected.filter(row=>JSON.parse(row.event).type==='user/message').map(row=>row.text))
-  const targetTokens=Math.max(256,Math.min(12000,Math.floor((reserve||16384)*.65),Math.floor(inputBudget*.1)))
-  const options={fanout:doc.settings.fanout,targetTokens},prompt=forkDirective(leaves,targetTokens,language.name,options)
-  const usage={};let text=''
-  await forkScope.run(true,async()=>{
-    const stream=service.ctx.llm.stream({...request,signal,messages:[...request.messages,createUserMessage({content:[{type:'text',text:prompt}]})]})
+  const usage={};let text='',options,prompt
+  let scoped,route
+  try{
+    if(doc.settings.forkModelOverride&&doc.settings.summaryAdapter)scoped=summaryContext(service.ctx,doc.settings.summaryAdapter)
+    if(scoped)await abortable(scoped.ready,signal)
+    route=await forkRoute(scoped?.ctx||service.ctx,request,{enabled:doc.settings.forkModelOverride,provider:doc.settings.summaryProvider,model:doc.settings.summaryModel},signal)
+    const targetTokens=Math.max(256,Math.min(12000,Math.floor((route.request.maxTokens||reserve||16384)*.65),Math.floor(inputBudget*.1)))
+    options={fanout:doc.settings.fanout,targetTokens};prompt=forkDirective(leaves,targetTokens,language.name,options)
+    if(measurement.totalTokens+Math.ceil(prompt.length/2)>=Math.min(inputBudget,route.inputBudget??Infinity)-1024)throw Error('所选后台模型放不下完整对话，原文保留')
+    await forkScope.run(true,async()=>{
+    const stream=route.ctx.llm.stream({...route.request,signal,messages:[...request.messages,createUserMessage({content:[{type:'text',text:prompt}]})]})
     for await(const chunk of completeSummaryStream(stream,signal)){
       signal.throwIfAborted();if(chunk.type==='text-delta')text+=chunk.text
       if(chunk.type==='usage')Object.assign(usage,chunk.usage)
     }
   })
+  }finally{scoped?.dispose()}
   signal.throwIfAborted()
   const current=service.forkRequests.get(id)
   if(current?.provider!==request.provider||current?.model!==request.model)throw Error('聊天模型已变化，摘要未保存')
@@ -76,7 +86,7 @@ export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=fa
   const ids=tree.map(n=>'fork-'+forkHash([id,digest,n.index]).slice(0,24))
   const nodes=tree.map(n=>({id:ids[n.index],level:n.level,first:leaves[0].sources[0],last:leaves.at(-1).sources.at(-1),children:n.children.map(i=>ids[i]),summary:n.summary,
     sources:leaves.filter(l=>l.firstMessage>=n.firstMessage&&l.lastMessage<=n.lastMessage).flatMap(l=>l.sources)}))
-  service.db.saveTree(id,nodes,owner,doc.revision,()=>readSettings(service.file).revision,selected,{provider:request.provider,model:request.model,usage})
+  service.db.saveTree(id,nodes,owner,doc.revision,()=>readSettings(service.file).revision,selected,{provider:route.request.provider,model:route.request.model,usage})
   await service.onTreeSaved?.(id,nodes)
   return 'complete'
 }
