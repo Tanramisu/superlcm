@@ -44,7 +44,9 @@ function activeBranch(store, session, leafId, keptId) {
 
 export function piPreparationRevision(store, session, env = process.env) {
   const policy = readPiPolicy(store.dir)
-  return policy.summaryMode === 'main-fork' ? forkHash(['pi-main-fork-tree-v2', policy]) : forkHash(['pi-api-preparation-v2',policy,summarySettingsRevision(store, session, env)])
+  // Fork drafts produced before parent summaries were preserved may have
+  // dropped parent-only facts. Regenerate them instead of installing them.
+  return policy.summaryMode === 'main-fork' ? forkHash(['pi-main-fork-tree-v3', policy]) : forkHash(['pi-api-preparation-v2',policy,summarySettingsRevision(store, session, env)])
 }
 export function stagePi(store, input, { env = process.env } = {}) {
   const policy = readPiPolicy(store.dir)
@@ -63,7 +65,10 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
   const captured = capturePi(store, input, { env, automatic: true })
   if (captured.skipped) throw Error('Pi 原文归档尚未完成')
   const session = captured.session, { branch, last } = activeBranch(store, session, input.leafId, input.firstKeptEntryId)
-  const setting = store.effectiveSetting(session, env), apiKey = store.apiCredential(session, env)
+  const setting = store.effectiveSetting(session, env)
+  // The native branch does not use an independent API credential. An old or
+  // temporarily unavailable credential store must not block that route.
+  const apiKey = policy.summaryMode === 'main-fork' ? null : store.apiCredential(session, env)
   if (policy.summaryMode !== 'main-fork' && (setting.mode !== 'api' || apiKey == null)) throw Error('Pi 压缩需要已配置的摘要 API，不使用主模型代替')
   const revision = piPreparationRevision(store, session, env)
   if(policy.summaryMode!=='main-fork'){
@@ -94,6 +99,7 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
     if (isReducedSummary(summary)) throw Error('Pi 摘要被机械截短，保留原上下文')
     valid(); calls++
     store.db.prepare('INSERT INTO pi_compaction_chunks VALUES(?,?,?,?) ON CONFLICT(session,key) DO UPDATE SET summary=excluded.summary,model=excluded.model').run(session, key, summary, setting.model)
+    store.db.prepare('DELETE FROM pi_rejected_chunks WHERE session=? AND key=?').run(session,key)
     return summary
   }
   let fork = null
@@ -119,13 +125,20 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
   const target = Math.min(20000, Math.max(2048, input.tokensBefore * 0.2))
   let nodes = fork?.tree?.length?[fork.tree.at(-1).summary]:summaries
   for (let level = 1; estimateSummaryTokens(nodes.join('\n\n')) > target && level <= 8 && !fork; level++) {
-    const next = []
+    const next = [],firstLevelKey=usedKeys.length
     for (let i = 0; i < nodes.length; i += 4) next.push(await generate(nodes.slice(i, i + 4).join('\n\n'), level))
-    if (estimateSummaryTokens(next.join('\n\n')) >= estimateSummaryTokens(nodes.join('\n\n'))) throw Error('Pi 摘要未能缩短，保留原上下文')
+    if (estimateSummaryTokens(next.join('\n\n')) >= estimateSummaryTokens(nodes.join('\n\n'))) {
+      // Keep successful source pieces, but do not retry the same failed merge.
+      for(const key of usedKeys.slice(firstLevelKey))store.db.prepare('INSERT OR IGNORE INTO pi_rejected_chunks VALUES(?,?)').run(session,key)
+      throw Error('Pi 摘要未能缩短，保留原上下文')
+    }
     nodes = next
   }
   valid()
-  if (estimateSummaryTokens(nodes.join('\n\n')) > target) throw Error('Pi 摘要仍超出预算，保留原上下文')
+  if (estimateSummaryTokens(nodes.join('\n\n')) > target) {
+    for(const key of usedKeys)store.db.prepare('INSERT OR IGNORE INTO pi_rejected_chunks VALUES(?,?)').run(session,key)
+    throw Error('Pi 摘要仍超出预算，保留原上下文')
+  }
   // Check the archived bytes again after model work. No uncertain cut point is published.
   activeBranch(store, session, input.leafId, input.firstKeptEntryId)
   if(fork?.tree&&fork.blocks.every(b=>Array.isArray(b.entryIds)&&b.entryIds.length)){

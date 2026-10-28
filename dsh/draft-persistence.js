@@ -6,6 +6,9 @@ import { SessionFoldRegistry } from './summary-guards.js'
 const key = (engine, agent) => createHash('sha256').update(JSON.stringify([
   engine.rollingConfig, engine.summaryRouteFingerprint(), engine.controlRevision ?? '',
   currentPolicy(engine, agent)?.signature ?? requestIdentity(agent),
+  // Older fork trees could replace a model-written parent with its children,
+  // dropping parent-only facts. Keep those drafts out of live context.
+  ...(engine.rollingConfig.summaryMode === 'main-fork' ? ['parent-preserving-tree-v3'] : []),
 ])).digest('hex')
 export function saveDraft(engine, agent, state) {
   if (state.status !== 'ready') return

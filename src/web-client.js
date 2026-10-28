@@ -124,7 +124,7 @@ function renderList() {
   for (const b of $('#rows').querySelectorAll('[data-del]')) b.onclick = () => { const c = state.rows.find(x => x.session === b.dataset.del); if (c) openDelete(c) }
   const go = $('#goConnect'); if (go) go.onclick = () => show('connect')
 }
-$('#more').onclick = () => act(() => loadConversations(false), $('#more'))
+$('#more').onclick = () => act(() => state.query ? runSearch(true) : loadConversations(false), $('#more'))
 const TRASH = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M6.8 7v4M9.2 7v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 function delButton(c) { return '<button type="button" class="row-del" data-del="' + esc(c.session) + '" title="' + t('删除对话') + '" aria-label="' + t('删除对话') + '">' + TRASH + '</button>' }
 function openBulkSummary() {
@@ -158,23 +158,30 @@ function openDelete(c) {
 /* ---------- search ---------- */
 let searchTimer
 $('#q').oninput = event => { state.query = event.target.value.trim(); clearTimeout(searchTimer); searchTimer = setTimeout(() => act(runSearch), 250) }
-async function runSearch() {
+async function runSearch(append = false) {
   if (!state.query) { renderList(); return }
-  const query = state.query, data = await api('/api/search?q=' + q(query) + (state.h ? '&harness=' + q(state.h) : ''))
-  if (query !== state.query) return
+  const query = state.query, harness=state.h, seq=state.searchSeq=(state.searchSeq||0)+1
+  const cursor=append?state.searchCursor:null
+  if(append&&!cursor)return
+  const data = await api('/api/search?q=' + q(query) + (harness ? '&harness=' + q(harness) : '') + (cursor ? '&cursor='+q(cursor) : ''))
+  if (query !== state.query || harness!==state.h || seq!==state.searchSeq) return
+  state.searchCursor=data.next_cursor??null
+  state.searchData=append?{...data,conversations:state.searchData.conversations,summaries:state.searchData.summaries,events:[...state.searchData.events,...data.events],search_errors:[...(state.searchData.search_errors||[]),...(data.search_errors||[])]}:data
+  const result=state.searchData
   const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
   const hl = text => esc(text).replace(pattern, m => '<mark>' + m + '</mark>')
   const hits = [
-    ...data.summaries.map(s => ({ c: s.conversation, where: t('摘要 · 第 {n} 层', { n: s.level + 1 }) + ' · #' + s.first + '–' + s.last, text: s.summary.slice(0, 300), node: s })),
-    ...data.events.map(e => ({ c: e.conversation, where: t('原文') + ' · #' + e.ordinal, text: e.snippet.replace(/^(user|assistant):\s*/, ''), ordinal: e.ordinal }))
+    ...result.summaries.map(s => ({ c: s.conversation, where: t('摘要 · 第 {n} 层', { n: s.level + 1 }) + ' · #' + s.first + '–' + s.last, text: s.summary.slice(0, 300), node: s })),
+    ...result.events.map(e => ({ c: e.conversation, where: t('原文') + ' · #' + e.ordinal, text: e.snippet.replace(/^(user|assistant):\s*/, ''), ordinal: e.ordinal }))
   ]
   $('#rows').innerHTML =
-    (data.conversations.length ? '<div class="group-label">' + t('对话') + '</div>' + data.conversations.map(c => '<button type="button" class="row" data-id="' + esc(c.session) + '">' + mark(c.harness) + '<span class="name">' + hl(c.name) + '</span><span class="meta">#' + esc(c.code) + '</span></button>').join('') : '') +
+    (result.conversations.length ? '<div class="group-label">' + t('对话') + '</div>' + result.conversations.map(c => '<button type="button" class="row" data-id="' + esc(c.session) + '">' + mark(c.harness) + '<span class="name">' + hl(c.name) + '</span><span class="meta">#' + esc(c.code) + '</span></button>').join('') : '') +
     (hits.length ? '<div class="group-label">' + t('内容 · {n} 处', { n: hits.length }) + '</div>' + hits.map((h, i) => '<button type="button" class="hit" data-i="' + i + '"><span class="where">' + esc(h.where) + ' · ' + esc(h.c.name) + '</span><span class="snip">' + hl(h.text) + '</span></button>').join('') : '') +
-    (data.search_complete===false ? '<div class="group-label">'+t('原文搜索尚未完成，请缩小到一个对话后继续检索。')+'</div>' : '') +
-    (!data.conversations.length && !hits.length && data.search_complete!==false ? '<div class="empty">' + t('未找到「{q}」', { q: esc(query) }) + '</div>' : '')
+    (state.searchCursor ? '<div class="group-label">'+t('原文搜索尚未完成，请继续加载。')+'</div>' : '') +
+    (result.search_errors?.length ? '<div class="group-label">'+t('部分原文暂时无法读取。')+'</div>' : '') +
+    (!result.conversations.length && !hits.length && data.search_complete!==false ? '<div class="empty">' + t('未找到「{q}」', { q: esc(query) }) + '</div>' : '')
   $('#listCount').textContent = t('搜索结果')
-  $('#more').hidden = true
+  $('#more').hidden = !state.searchCursor
   for (const b of $('#rows').querySelectorAll('.row')) b.onclick = () => select(b.dataset.id)
   for (const b of $('#rows').querySelectorAll('.hit')) b.onclick = () => act(async () => {
     const hit = hits[Number(b.dataset.i)]

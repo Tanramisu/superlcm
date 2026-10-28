@@ -8,6 +8,7 @@ import {summarizeNativeFork} from './native-fork.js'
 import {bindSummaryRun,finishSummaryRun,progressSummaryRun,summaryRunOwns} from './summary-runs.js'
 import {summaryAttempt} from './summary-attempt.js'
 import {classifySummaryError,summaryErrorDetail} from './summary-errors.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
 
 export function nativeContextUsage(store,session,provided={}){
   if(provided.tokens>0&&provided.window>0)return provided
@@ -70,12 +71,28 @@ export function saveForkTree(store,session,plan,tree,{model,usage={},branchId=nu
   store.db.exec('BEGIN IMMEDIATE')
   try{
     if(!validate()||owner&&!store.ownsLease(session,owner))throw Error('摘要配置或任务归属已变化，结果未保存')
-    for(const row of plan.originals){store.exact(session,row.ordinal);if(store.db.prepare('SELECT digest FROM events WHERE session=? AND ordinal=?').get(session,row.ordinal)?.digest!==row.digest)throw Error('摘要原文已变化，结果未保存')}
+    const claude=store.metadata(session).harness==='claude-code',unrepresented=[]
+    // A resumed Claude branch may only see its native checkpoint after the
+    // host has compacted. It cannot certify older raw messages as fully seen.
+    let uncertainBefore=claude?store.lastCompaction(session):0
+    for(const row of plan.originals){
+      const raw=store.exact(session,row.ordinal)
+      if(store.db.prepare('SELECT digest FROM events WHERE session=? AND ordinal=?').get(session,row.ordinal)?.digest!==row.digest)throw Error('摘要原文已变化，结果未保存')
+      if(claude){
+        const record=JSON.parse(raw)
+        if(record.isCompactSummary===true||record.subtype==='compact_boundary')uncertainBefore=Math.max(uncertainBefore,row.ordinal+1)
+        if(hasUnrepresentedContent(raw))unrepresented.push(row.ordinal)
+      }
+    }
     const ids=tree.map(n=>n.archiveId||'s'+n.level+'-'+forkHash([session,plan.digest,n.index,n.summary]).slice(0,24))
     for(const node of tree){
       const inserted=store.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(session,ids[node.index],node.semanticLevel??node.level,node.firstMessage,node.lastMessage,JSON.stringify(node.children.map(i=>ids[i])),node.summary,plan.digest,model)
       if(node.modelSummary){store.db.exec('CREATE TABLE IF NOT EXISTS fork_parent_variants(session TEXT,id TEXT,summary TEXT,PRIMARY KEY(session,id))');store.db.prepare('INSERT OR IGNORE INTO fork_parent_variants VALUES(?,?,?)').run(session,ids[node.index],node.modelSummary)}
-      store.db.prepare('INSERT OR IGNORE INTO summary_node_quality VALUES(?,?,1)').run(session,ids[node.index])
+      const complete=!claude||node.firstMessage>=uncertainBefore&&!unrepresented.some(ordinal=>ordinal>=node.firstMessage&&ordinal<=node.lastMessage)
+      if(inserted.changes){
+        store.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET complete=excluded.complete').run(session,ids[node.index],complete?1:0)
+        if(claude)store.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v2 VALUES(?,?)').run(session,ids[node.index])
+      }
       if(node.sourceRecords){
         store.db.exec('CREATE TABLE IF NOT EXISTS dsh_node_sources(session TEXT NOT NULL,id TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(session,id,seq))')
         for(const seq of node.sourceRecords){if(!plan.originals.some(r=>r.ordinal===seq)||seq<node.firstMessage||seq>node.lastMessage)throw Error('摘要来源不属于当前分支');store.db.prepare('INSERT OR IGNORE INTO dsh_node_sources VALUES(?,?,?)').run(session,ids[node.index],seq)}

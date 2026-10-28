@@ -48,8 +48,11 @@ test('native continuation is verified from archived metadata, not a text prefix'
   const run = spawnSync(process.execPath, ['src/cli.js', 'compact-packet', 's'], { env: { ...process.env, SUPERLCM_HOME: store.dir }, input: JSON.stringify({ messages: live, tokens: 250000 }), encoding: 'utf8' })
   assert.equal(run.status, 0, run.stderr)
   const packet = JSON.parse(run.stdout)
-  assert.equal(packet.use, true, packet.reason)
-  assert.equal(packet.start, 2)
+  assert.equal(packet.use, false, 'a truncated native message and an unrecorded assistant message cannot prove the active sequence')
+  const exactLive=[msg('user',native,{size:90000}),msg('user','latest real user prompt'),msg('assistant','current answer')]
+  const exactRun=spawnSync(process.execPath,['src/cli.js','compact-packet','s'],{env:{...process.env,SUPERLCM_HOME:store.dir},input:JSON.stringify({messages:exactLive,tokens:250000}),encoding:'utf8'})
+  assert.equal(exactRun.status,0,exactRun.stderr)
+  const exactPacket=JSON.parse(exactRun.stdout);assert.equal(exactPacket.use,true,exactPacket.reason);assert.equal(exactPacket.start,1)
   assert.equal(verifiedCompactionInput(store, 's', [msg('user', native.slice(0, 2000) + ' analyze this quote')]).messages[0].nativeSummary, false)
   assert.equal(verifiedCompactionInput(store, 's', [msg('user', 'another prompt'), ...live]).messages[1].nativeSummary, false)
   const quoted = join(dir, 'quoted.jsonl')

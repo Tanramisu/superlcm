@@ -64,14 +64,14 @@ test('independent concurrent credential writes survive restart and legacy import
  for(let i=0;i<12;i++)assert.equal(readApiKey(f.store.dir,'model:'+i),'synthetic-key-'+i)
  assert.equal(readApiKey(f.store.dir,'global'),'synthetic-global');assert.equal(removeApiKey(f.store.dir,'model:1'),true);assert.equal(readApiKey(f.store.dir,'model:1'),null)
 })
-test('expanding parent reuses complete children and preserves original model variant',t=>{
+test('a longer model parent remains available instead of dropping its unique content',t=>{
  const f=fixture(t);ingest(f,[{role:'user',content:'First original'},{role:'assistant',content:'Second original'}])
  const leaves=[{firstMessage:0,lastMessage:0},{firstMessage:1,lastMessage:1}],large='# Overview\n'+ 'Repeated evidence. '.repeat(400)
  const tree=parseForkTree(JSON.stringify({blocks:[{index:0,summary:'# First\nPending.'},{index:1,summary:'# Second\nKeep originals.'},{index:2,summary:large}]}),leaves,undefined,{targetTokens:10000})
- assert.equal(tree[2].kind,'assembled');assert.equal(tree[2].modelSummary,large.trim());assert.ok(tree[2].summary.includes('# Second'))
+ assert.equal(tree[2].kind,'condensed');assert.equal(tree[2].summary,large.trim());assert.equal(tree[2].compression.nonShrinking,true)
  const originals=f.store.eventRows('s').map(r=>({ordinal:r.ordinal,digest:r.digest}))
  const ids=saveForkTree(f.store,'s',{digest:'audit',originals},tree,{model:'offline'})
- assert.equal(f.store.describe('s',ids[2]).model_variant,large.trim())
+ assert.equal(f.store.outline('s',ids[2]).node.summary,large.trim())
  assert.ok(frontier(f.store.nodeRows('s',0),1).length)
 })
 test('a frozen leaf is reused verbatim without asking the model to rewrite it',()=>{

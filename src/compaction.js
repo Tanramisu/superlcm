@@ -5,7 +5,7 @@ import { isReducedSummary } from './summary-fitting.js'
 // When the summaries do not cover enough, the caller hands the compaction back to Claude Code.
 export const PACKET_TAG = 'superlcm-context'
 import { RECALL_POLICY } from './summary-policy.js'
-import { estimateSummaryTokens } from './summary-tokens.js'
+import { estimateSummaryTokens,summaryTokenUnits } from './summary-tokens.js'
 export const takeoverDefaults = { enabled: false, window: 300000, keep: 40000 } // keep: newest tokens left word for word
 export const takeoverLimits = { window: [100000, 950000], keep: [5000, 200000] }
 const MAX_PACKET_CHARS = 120000
@@ -21,6 +21,7 @@ const isSynthetic = m => isPacket(m) || m.nativeSummary === true
 const isPrompt = m => m.role === 'user' && m.text.trim() && !m.toolResults && !isSynthetic(m)
 const isHumanPrompt = m => isPrompt(m) && m.prompt !== 'system'
 const escapeAttr = s => String(s).replace(/[&"<>]/g, c => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' })[c])
+const summaryBlock = n => `<summary id="${escapeAttr(n.id)}" level="${n.level}" records="${n.first}-${n.last}">\n${String(n.summary).trim()}\n</summary>\n`
 
 // Records 0..through are covered when level-0 summaries chain from record 0 without a gap.
 export function coveredThrough(nodes) {
@@ -31,26 +32,60 @@ export function coveredThrough(nodes) {
   }
   return through
 }
-// The fewest summaries that tile records 0..through: at each point the highest level that starts there.
-export function frontier(nodes, through) {
-  const out = []
-  for (let at = 0; at <= through;) {
-    const fits = nodes.filter(x => x.first === at && x.last <= through).sort((a, b) => b.level - a.level)
-    // A shortened parent may hide complete children. Prefer those complete
-    // nodes; a genuinely incomplete leaf still refuses context replacement.
-    const complete=fits.filter(x=>!x.sourceIncomplete&&!isReducedSummary(x.summary))
-    // An expensive parent need not block its complete, cheaper descendants.
-    // Every alternative must still tile the same exact source prefix.
-    const cost=x=>String(x.summary).length+200
-    const n = complete.reduce((best,x)=>{
-      const descendants=nodes.filter(c=>c.first>=x.first&&c.last<=x.last&&c.level<x.level&&!isReducedSummary(c.summary))
-      let at=x.first,total=0
-      while(at<=x.last){const child=descendants.filter(c=>c.first===at).sort((a,b)=>cost(a)-cost(b))[0];if(!child)break;total+=cost(child);at=child.last+1}
-      return at>x.last&&total<cost(x)?best:best||x
-    },null) || complete.at(-1) || fits.at(-1)
-    if (!n) break
-    out.push(n); at = n.last + 1
+// Find the cheapest complete tiling of the covered prefix. Overlapping rescue
+// checkpoints need not have children that start at their end; a partial tiling
+// must never authorize removing the records it missed.
+export function frontier(nodes, through, metric = 'tokens') {
+  if(through<0)return []
+  const groups=new Map()
+  for(const n of nodes){
+    if(!Number.isSafeInteger(n.first)||!Number.isSafeInteger(n.last)||n.first<0||n.last<n.first||n.last>through||n.sourceIncomplete||isReducedSummary(n.summary))continue
+    const group=groups.get(n.first)||[];group.push(n);groups.set(n.first,group)
   }
+  const best=new Map([[through+1,{cost:0,node:null}]])
+  for(const at of [...groups.keys()].sort((a,b)=>b-a)){
+    for(const n of groups.get(at)){
+      const tail=best.get(n.last+1);if(!tail)continue
+      const block=summaryBlock(n)
+      const cost=(metric==='chars'?block.length:summaryTokenUnits(block))+tail.cost, old=best.get(at)
+      if(!old||cost<old.cost||(cost===old.cost&&n.level>old.node.level))best.set(at,{cost,node:n})
+    }
+  }
+  if(!best.has(0))return []
+  const out=[]
+  for(let at=0;at<=through;){const n=best.get(at)?.node;if(!n)return [];out.push(n);at=n.last+1}
+  return out
+}
+// A complete frontier must satisfy both the packet character limit and the
+// remaining context budget. Keep only nondominated choices; bound the work
+// and fall back to native compaction if an adversarial tree is too complex.
+function frontierWithin(nodes,through,maxChars,maxUnits) {
+  if(through<0||maxChars<0||maxUnits<0)return null
+  const groups=new Map()
+  for(const n of nodes){
+    if(!Number.isSafeInteger(n.first)||!Number.isSafeInteger(n.last)||n.first<0||n.last<n.first||n.last>through||n.sourceIncomplete||isReducedSummary(n.summary))continue
+    const group=groups.get(n.first)||[];group.push(n);groups.set(n.first,group)
+  }
+  const states=new Map([[through+1,[{chars:0,units:0,node:null,tail:null}]]])
+  for(const at of [...groups.keys()].sort((a,b)=>b-a)){
+    const choices=[]
+    for(const node of groups.get(at)){
+      const block=summaryBlock(node),chars=block.length,units=summaryTokenUnits(block)
+      for(const tail of states.get(node.last+1)||[]){
+        const c=chars+tail.chars,u=units+tail.units
+        if(c<=maxChars&&u<=maxUnits){choices.push({chars:c,units:u,node,tail});if(choices.length>65536)return null}
+      }
+    }
+    choices.sort((a,b)=>a.units-b.units||a.chars-b.chars||b.node.level-a.node.level)
+    const useful=[];let minChars=Infinity
+    for(const choice of choices)if(choice.chars<minChars){useful.push(choice);minChars=choice.chars}
+    if(useful.length>4096)return null
+    if(useful.length)states.set(at,useful)
+  }
+  let chosen=states.get(0)?.[0]
+  if(!chosen)return null
+  const out=[]
+  while(chosen.node){out.push(chosen.node);chosen=chosen.tail}
   return out
 }
 // Where the covered part ends inside the live transcript: the index just after the last covered record
@@ -121,7 +156,7 @@ export function renderPacket({ meta, summaries, through, keep, instructions, rec
     (instructions ? `The person asked this compaction to keep in mind: ${instructions.slice(0, 2000)}\n` : '')
   let body = ''
   for (const n of summaries) {
-    const block = `<summary id="${escapeAttr(n.id)}" level="${n.level}" records="${n.first}-${n.last}">\n${String(n.summary).trim()}\n</summary>\n`
+    const block = summaryBlock(n)
     // Every covered source range needs its summary in the replacement. A
     // navigation notice cannot stand in for an omitted continuation summary.
     if (head.length + body.length + block.length > MAX_PACKET_CHARS) return null
@@ -150,7 +185,8 @@ export function planCompaction(input) {
 function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0, window = takeoverDefaults.window, keepTokens = takeoverDefaults.keep, trigger }, recent) {
   const through = coveredThrough(nodes)
   if(through<0&&nodes.some(n=>n.sourceIncomplete||isReducedSummary(n.summary)))return {use:false,reason:'incomplete-source summaries are navigation only; use native compaction'}
-  if(frontier(nodes,through).some(n=>isReducedSummary(n.summary)))return {use:false,reason:'mechanically shortened summaries are navigation only; use native compaction'}
+  const summaries=frontier(nodes,through)
+  if(through>=0&&!summaries.length)return {use:false,reason:'summaries do not completely cover the source prefix; use native compaction'}
   if (through < 0 && !recent) return { use: false, reason: 'no summaries written yet' }
   // With the dialogue carried along, every message in context is covered: the cut is at the end.
   const candidates = recent ? [messages.length] : cutCandidates(messages, events, through)
@@ -181,10 +217,18 @@ function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0
   const dropsNative=start=>messages.slice(0,start).some(m=>m.role==='user'&&!m.nativeSummary&&m.text.trim()&&native.has(key('user: '+m.text.trim())))
   const finish=(at,request=null)=>{
     const keep=messages.length-at
-    const packet=renderPacket({meta,summaries:frontier(nodes,through),through:recent?recent.last:through,keep,instructions,recent,request})
-    if(!packet)return {use:false,reason:'complete request and packet exceed safe size; use native compaction'}
+    let packet=renderPacket({meta,summaries,through:recent?recent.last:through,keep,instructions,recent,request})
     const kept=messages.slice(at).reduce((s,m)=>s+size(m),0)
-    const after=Math.round(tokens*kept/total+estimateSummaryTokens(packet))
+    let after=packet?Math.round(tokens*kept/total+estimateSummaryTokens(packet)):Infinity
+    if((!packet||after>window*MAX_AFTER)&&through>=0){
+      const baseline=renderPacket({meta,summaries:[],through:recent?recent.last:through,keep,instructions,recent,request})
+      if(baseline){
+        const tokenBudget=Math.floor(window*MAX_AFTER-tokens*kept/total)
+        const alternative=frontierWithin(nodes,through,MAX_PACKET_CHARS-baseline.length,tokenBudget*4-summaryTokenUnits(baseline))
+        if(alternative){packet=renderPacket({meta,summaries:alternative,through:recent?recent.last:through,keep,instructions,recent,request});after=packet?Math.round(tokens*kept/total+estimateSummaryTokens(packet)):Infinity}
+      }
+    }
+    if(!packet)return {use:false,reason:'complete request and packet exceed safe size; use native compaction'}
     if(after>window*MAX_AFTER)return {use:false,reason:`the compacted context is too large: about ${after} tokens would remain`}
     return {use:true,packet,start:at,keep,through:recent?recent.last:through,after,...(recent?{recent:true}:{}),...(request?{inTurn:true}:{})}
   }
@@ -218,6 +262,7 @@ export function safeAssistantStarts(messages) {
 function requestAt(events,ordinal) {
  const e=events.find(e=>e.ordinal===ordinal)
  if(!e||e.nativeSummary||!e.preview.startsWith('user: ')||e.toolResults||e.humanPrompt===false)return null
+ if('verifiedRequest' in e)return e.verifiedRequest
  return {ordinal:e.ordinal,text:e.text??e.preview.slice(6)}
 }
 export function turnTail({messages,events,cut,tokens,total,size,keepTokens,window,force=false}) {

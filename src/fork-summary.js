@@ -60,14 +60,10 @@ export function parseForkTree(text,leaves,language,{fanout=4,targetTokens=Infini
     node.semanticLevel=children.length?1+Math.max(...children.map(c=>c.semanticLevel)):0
     if(!children.length)continue
     const childTokens=children.reduce((sum,c)=>sum+estimateSummaryTokens(c.summary),0),parentTokens=estimateSummaryTokens(node.summary)
-    node.compression={parentTokens,childTokens}
-    if(parentTokens>=childTokens){
-      // Keep the complete model variant for recall. Reusing the already valid
-      // children makes progress without discarding a whole successful response.
-      node.modelSummary=node.summary
-      node.summary=children.map(c=>c.summary).join('\n\n')
-      node.kind='assembled';node.semanticLevel=Math.max(...children.map(c=>c.semanticLevel))
-    }
+    // The parent may contain a decision absent from its children. Keep the
+    // actual model output even when it is longer; callers still enforce their
+    // own hard capacity and may retry if it cannot fit.
+    node.compression={parentTokens,childTokens,nonShrinking:parentTokens>=childTokens}
   }
   return tree
 }

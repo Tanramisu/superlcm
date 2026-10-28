@@ -1,8 +1,6 @@
 import { migrateSummaryModes } from './summary-migration.js'
 import {privateDirectory,privateFile} from './private-path.js'
 import {summarySource} from './summary-source.js'
-import {hasUnrepresentedContent} from './source-completeness.js'
-import {estimateSummaryTokens} from './summary-tokens.js'
 import { initializeEventCounts } from './event-counts.js'
 import { codexHeadlessRecord, codexHeadlessStatus } from './codex.js'
 import { initializeSummaryRuns, latestSummaryRun, summaryRunHistory, recoverSummaryRuns } from './summary-runs.js'
@@ -85,6 +83,8 @@ export class ClaudeStore {
       CREATE INDEX IF NOT EXISTS nodes_level ON nodes(session,level,first);
       CREATE INDEX IF NOT EXISTS nodes_coverage ON nodes(session,last);
       CREATE TABLE IF NOT EXISTS summary_node_quality(session TEXT,id TEXT,complete INTEGER NOT NULL,PRIMARY KEY(session,id));
+      CREATE TABLE IF NOT EXISTS claude_node_coverage_v2(session TEXT,id TEXT,PRIMARY KEY(session,id));
+      CREATE TABLE IF NOT EXISTS credential_bindings(scope TEXT PRIMARY KEY,revision TEXT);
       CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(session UNINDEXED, id UNINDEXED, summary);
       CREATE TABLE IF NOT EXISTS leases(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS summary_retries(session TEXT PRIMARY KEY,batch_id TEXT NOT NULL,revision TEXT NOT NULL,attempts INTEGER NOT NULL,until_ms INTEGER NOT NULL);
@@ -476,12 +476,17 @@ export class ClaudeStore {
   outline(session, nodeId) {
     const source=this.metadata(session), stats=this.stats(session)
     const tail=stats.coverage==='selected-records'?stats.latest_tail:stats.summarized_to<stats.records?{from:stats.summarized_to,to:stats.records-1}:null
-    if(!nodeId) return {source,...stats,nodes:this.roots(session),unsummarized:tail}
+    const variants=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='fork_parent_variants'").get()
+    if(!nodeId) {
+      const alternate_summaries=variants?this.db.prepare('SELECT n.id,n.level,n.first,n.last,substr(v.summary,1,400) AS preview FROM fork_parent_variants v JOIN nodes n ON n.session=v.session AND n.id=v.id WHERE v.session=? ORDER BY n.first,n.level DESC').all(session):[]
+      return {source,...stats,nodes:this.roots(session),unsummarized:tail,...(alternate_summaries.length?{alternate_summaries}:{})}
+    }
     const node=this.node(session,nodeId)
     if(!node) throw new Error('Unknown summary node')
     const children=JSON.parse(node.children)
     const directSources=claudeDirectSources(this,session,node)
-    const described=dshNodeSources(this.db,session,{...node,children,directSources})
+    const variant=variants?this.db.prepare('SELECT summary FROM fork_parent_variants WHERE session=? AND id=?').get(session,nodeId)?.summary:null
+    const described=dshNodeSources(this.db,session,{...node,children,directSources,...(variant?{model_variant:variant}:{})})
     if(children.length) return {source,node:described,directSources,nodes:children.map(id=>this.node(session,id)).filter(Boolean).map(n=>dshNodeSources(this.db,session,{...n,children:JSON.parse(n.children),directSources:claudeDirectSources(this,session,n)}))}
     const selected=described.source_records?new Set(described.source_records):null
     const events=this.db.prepare("SELECT ordinal,substr(preview,1,400) AS preview FROM events WHERE session=? AND ordinal BETWEEN ? AND ? AND preview<>'' ORDER BY ordinal").all(session,node.first,node.last).filter(e=>!selected||selected.has(e.ordinal))
@@ -539,7 +544,11 @@ export class ClaudeStore {
     const scope=(session?' AND x.session=?':harness?" AND x.session IN (SELECT session FROM session_origins WHERE harness=?)":'')+(excludeRetired?" AND x.session NOT IN (SELECT session FROM session_origins WHERE harness='hermes')":'')
     const args=session?[session]:harness?[harness]:[]
     const conversations=session?[]:this.resolve(query).filter(m=>(!harness||m.harness===harness)&&(!excludeRetired||m.harness!=='hermes')).slice(0,10)
-    const summaries=this.db.prepare(`SELECT x.session,x.id,x.level,x.first,x.last,x.summary FROM nodes x WHERE x.summary LIKE ? ESCAPE '\\' AND ${dshVisibleNodes(this.db,'x')}${scope} ORDER BY x.level DESC,x.first DESC LIMIT ?`).all(like,...args,cap).map(r=>({...r,conversation:this.metadata(r.session)}))
+    const hasVariants=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='fork_parent_variants'").get()
+    const summaries=(hasVariants
+      ? this.db.prepare(`SELECT x.session,x.id,x.level,x.first,x.last,CASE WHEN x.summary LIKE ? ESCAPE '\\' AND ${dshVisibleNodes(this.db,'x')} THEN x.summary ELSE v.summary END AS summary FROM nodes x LEFT JOIN fork_parent_variants v ON v.session=x.session AND v.id=x.id WHERE ((x.summary LIKE ? ESCAPE '\\' AND ${dshVisibleNodes(this.db,'x')}) OR v.summary LIKE ? ESCAPE '\\')${scope} ORDER BY x.level DESC,x.first DESC LIMIT ?`).all(like,like,like,...args,cap)
+      : this.db.prepare(`SELECT x.session,x.id,x.level,x.first,x.last,x.summary FROM nodes x WHERE x.summary LIKE ? ESCAPE '\\' AND ${dshVisibleNodes(this.db,'x')}${scope} ORDER BY x.level DESC,x.first DESC LIMIT ?`).all(like,...args,cap)
+    ).map(r=>({...r,conversation:this.metadata(r.session)}))
     const originals=this.searchOriginals(query,{scope,args,cap,cursor})
     return {query,conversations,summaries,...originals}
   }
@@ -670,7 +679,8 @@ export class ClaudeStore {
       for (const id of deliveries) { this.db.prepare('DELETE FROM delivery_packets WHERE id=?').run(id); this.db.prepare('DELETE FROM deliveries WHERE id=?').run(id) }
       if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_compaction_chunks'").get())this.db.prepare('DELETE FROM pi_compaction_chunks WHERE session=?').run(session)
       if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_prepared_compactions'").get())this.db.prepare('DELETE FROM pi_prepared_compactions WHERE session=?').run(session)
-      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      for(const table of ['pi_rejected_chunks','fork_parent_variants'])if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table))this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'summary_node_quality', 'claude_node_coverage_v2', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
       this.db.prepare('INSERT INTO deleted_sessions(session,deleted_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET deleted_ms=excluded.deleted_ms').run(session, Date.now())
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
@@ -800,16 +810,14 @@ export class ClaudeStore {
   nodeSourceIncomplete(session,node,seen=new Set()) {
     if(seen.has(node.id))return true
     const known=this.db.prepare('SELECT complete FROM summary_node_quality WHERE session=? AND id=?').get(session,node.id)
-    if(known)return known.complete!==1
-    const children=typeof node.children==='string'?JSON.parse(node.children):node.children||[]
-    const next=new Set([...seen,node.id])
-    if(children.length)return children.some(id=>{const child=this.node(session,id);return !child||this.nodeSourceIncomplete(session,child,next)})
-    const tuning=this.tuning(),budget=tuning.target_tokens||Math.floor(tuning.target_chars/4)
-    for(let i=node.first;i<=node.last;i++){
-      const raw=this.exact(session,i)
-      if(hasUnrepresentedContent(raw)||estimateSummaryTokens(summarySource(raw,this.source(session).kind))>budget)return true
+    if(known){
+      if(known.complete!==1)return true
+      const origin=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness
+      return origin==='claude-code'&&!this.db.prepare('SELECT 1 FROM claude_node_coverage_v2 WHERE session=? AND id=?').get(session,node.id)
     }
-    return false
+    // Legacy summaries did not store which budget or source projection was used.
+    // Today's setting cannot prove that an earlier summary saw the full source.
+    return true
   }
   node(session, id) { return this.db.prepare('SELECT * FROM nodes WHERE session=? AND id=?').get(session, id) }
   addNode(node, { leaseOwner,validate } = {}) {
@@ -818,7 +826,13 @@ export class ClaudeStore {
       if (leaseOwner && !this.ownsLease(node.session, leaseOwner)) throw new Error('Summary writer lost its lease; result not saved')
       if(validate&&!validate())throw Error('Summary setting changed; result not saved')
       const inserted=this.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(node.session,node.id,node.level,node.first,node.last,JSON.stringify(node.children),node.summary,node.digest,node.model)
-      this.db.prepare('INSERT OR IGNORE INTO summary_node_quality VALUES(?,?,?)').run(node.session,node.id,node.sourceComplete===false?0:1)
+      // A previously saved node may predate source-quality tracking. A later
+      // attempt with the same id must not certify the old stored summary.
+      if(inserted.changes){
+        this.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET complete=excluded.complete').run(node.session,node.id,node.sourceComplete===false?0:1)
+        if(this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(node.session)?.harness==='claude-code')
+          this.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v2 VALUES(?,?)').run(node.session,node.id)
+      }
       if (inserted.changes) this.db.prepare('INSERT INTO node_fts(session,id,summary) VALUES(?,?,?)').run(node.session,node.id,node.summary)
       if(node.sourceRecords) {
         this.db.exec('CREATE TABLE IF NOT EXISTS dsh_node_sources(session TEXT NOT NULL,id TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(session,id,seq))')

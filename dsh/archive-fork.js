@@ -1,6 +1,6 @@
 import {forkRoute} from './fork-route.js'
 import {summaryContext} from './summary-model.js'
-import {abortable} from './summary-attempt.js'
+import {abortable,summaryAttempt} from './summary-attempt.js'
 import {ArchiveDatabase} from './archive-db.js'
 // Passive archive summaries use the same one-response tree contract as takeover.
 // This module never changes a session surface or invokes a compaction method.
@@ -36,7 +36,9 @@ export function registerArchiveCapture(service){
   })
 }
 export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=false}={}){
-  signal=AbortSignal.any([signal,AbortSignal.timeout(DSH_SUMMARY_TIMEOUT_MS)])
+  return summaryAttempt((attempt,progress)=>runArchiveFork(service,id,doc,owner,attempt,{force},progress),signal,DSH_SUMMARY_TIMEOUT_MS)
+}
+async function runArchiveFork(service,id,doc,owner,signal,{force},progress){
   const request=service.forkRequests.get(id),session=service.ctx.sessions.get(id)
   if(!request||!session)return 'awaiting-live-request'
   const info=await abortable(service.ctx.llm.resolveModelInfo(request.provider,request.model,signal),signal)
@@ -75,7 +77,9 @@ export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=fa
     await forkScope.run(true,async()=>{
     const stream=route.ctx.llm.stream({...route.request,signal,messages:[...request.messages,createUserMessage({content:[{type:'text',text:prompt}]})]})
     for await(const chunk of completeSummaryStream(stream,signal)){
-      signal.throwIfAborted();if(chunk.type==='text-delta')text+=chunk.text
+      signal.throwIfAborted()
+      if(['text-delta','reasoning-delta'].includes(chunk.type)&&typeof chunk.text==='string'&&chunk.text.trim())progress()
+      if(chunk.type==='text-delta')text+=chunk.text
       if(chunk.type==='usage')Object.assign(usage,chunk.usage)
     }
   })

@@ -21,7 +21,7 @@ import { ClaudeStore } from './store.js'
 import { continuePacket } from './context.js'
 import { modelCatalog, harnessConnections } from './model-catalog.js'
 import { summaryMode } from './mode.js'
-import { saveApiKey, readApiKey, removeApiKey, apiKeyEndpoint } from './api-credentials.js'
+import { stageApiKey, bindApiKey, readApiKey, apiKeyEndpoint } from './api-credentials.js'
 import { loopbackEndpoint } from './api-endpoint.js'
 import { findCli } from './runtime.js'
 import { summaryEstimate, summarizeWithModel } from './summarize.js'
@@ -168,9 +168,11 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
       if (x.id && !before) throw new Error('Unknown API model')
       const m = store.checkApiModel({ provider: x.api_provider || null, url: x.api_url || null, model: x.model || null, label: x.label || null, effort: x.effort || null })
       // The key: typed now, else this model's own (same endpoint), else one saved for the same endpoint.
-      let key = x.api_key || (before && before.url === m.url ? readApiKey(store.dir, 'model:' + before.id) : null)
+      const beforeKey=before&&before.url===m.url?readApiKey(store.dir,'model:'+before.id,m.url):null
+      let key = x.api_key || beforeKey
       if (!key) { const donor = store.apiModels().find(y => y.id !== x.id && y.url === m.url && store.hasApiCredential('model:' + y.id)); if (donor) key = readApiKey(store.dir, 'model:' + donor.id) }
       if (!key && !loopbackEndpoint(m.url)) throw new Error(before ? 'A new endpoint needs its API key' : 'Enter an API key for this model')
+      const probedKey=key
       if (x.skip_test !== true) {
         try { await probeModel({ model: m.model, apiKey: key || '', apiProvider: m.provider, apiURL: m.url, effort: m.effort }) }
         catch (error) { throw new Error('Test call failed: ' + String(error?.message || error).slice(0, 400)) }
@@ -178,12 +180,23 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
       let saved
       store.db.exec('BEGIN IMMEDIATE')
       try{
+        const current=x.id?store.apiModel(x.id):null
+        const currentKey=current&&current.url===m.url?readApiKey(store.dir,'model:'+current.id,m.url):null
+        // A blank key means keep the current key. A slow probe must not
+        // overwrite a newer key that was saved for this same endpoint.
+        if(!x.api_key&&before&&before.url===m.url&&current?.url===m.url&&currentKey!==beforeKey){
+          key=currentKey
+          if(!key&&!loopbackEndpoint(m.url))throw Error('The API key changed while testing; save this model again')
+        }
+        const tested=x.skip_test!==true&&key===probedKey
         saved = store.saveApiModel({ id: x.id || null, ...m })
-        if (key) saveApiKey(store.dir, 'model:' + saved.id, key, m.url)
-        else if (before && before.url !== m.url) removeApiKey(store.dir, 'model:' + saved.id)
+        const scope='model:'+saved.id
+        if (key&&(!current||current.url!==m.url||key!==currentKey))bindApiKey(store.db,scope,stageApiKey(store.dir,scope,key,m.url))
+        else if (!key&&current&&current.url!==m.url)bindApiKey(store.db,scope,null)
         store.db.exec('COMMIT')
+        saved={...saved,tested}
       }catch(error){store.db.exec('ROLLBACK');throw error}
-      return { ...saved, key_configured: store.hasApiCredential('model:' + saved.id), tested: x.skip_test !== true }
+      return { ...saved, key_configured: store.hasApiCredential('model:' + saved.id) }
     },
     // 接管压缩 on/off and its size; turning it on also sets Claude Code's autoCompactWindow (see src/takeover.js).
     'POST /api/takeover': async req => { const x = await body(req); const r = applyTakeover(store, { enabled: x.enabled === true, ratio: x.ratio, window: x.window === undefined ? undefined : Number(x.window), keep: x.keep === undefined ? undefined : Number(x.keep) }, env); return { ...r, previous: undefined, plugin: claudePluginEnabled(env) } },
@@ -203,21 +216,31 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
       const scope = x.scope === 'global' ? 'global' : 'harness:' + x.harness
       const model = x.model || null, provider = x.api_provider || null, address = x.api_url || null, key = x.api_key
       const checked = store.validateSetting(x.mode, model, provider, address)
+      let chosenKey=null
       if (x.mode === 'api') {
         if (key !== undefined && typeof key !== 'string') throw new Error('API key must be text')
         const prior = x.scope === 'global' ? store.globalSetting() : store.harnessSetting(x.harness)
         const sameEndpoint = prior?.mode === 'api' && !prior.api_ref && prior.api_url === checked.api_url
-        let chosenKey = key || (sameEndpoint || apiKeyEndpoint(store.dir, scope) === checked.api_url ? readApiKey(store.dir, scope, checked.api_url) : null)
+        const oldKey=sameEndpoint||apiKeyEndpoint(store.dir,scope)===checked.api_url?readApiKey(store.dir,scope,checked.api_url):null
+        chosenKey = key || oldKey
         // Same endpoint as the default setting or another tool: reuse the key already saved there.
         if (!chosenKey) {
           const donor = [['global', store.globalSetting()], ...store.harnessSettings().map(y => [store.harnessKeyScope(y.harness, y), y])].find(([s, y]) => s !== scope && y?.mode === 'api' && y.api_url === checked.api_url && store.hasApiCredential(s))
           if (donor) chosenKey = readApiKey(store.dir, donor[0], checked.api_url)
         }
         if (!chosenKey && !loopbackEndpoint(checked.api_url)) throw new Error('A new endpoint needs its API key; enter and save it for this setting')
-        if (chosenKey) saveApiKey(store.dir, scope, chosenKey, checked.api_url)
-        else if (!sameEndpoint) removeApiKey(store.dir, scope)
       } else if (key) throw new Error('API key is accepted only for custom API mode')
-      const result = x.scope === 'global' ? store.setGlobalSetting(x.mode, model, provider, address) : store.setHarnessSetting(x.harness, x.mode, model, provider, address)
+      let result
+      store.db.exec('BEGIN IMMEDIATE')
+      try{
+        const current=x.scope==='global'?store.globalSetting():store.harnessSetting(x.harness)
+        const same=current?.mode==='api'&&!current.api_ref&&current.api_url===checked.api_url
+        const oldKey=x.mode==='api'&&(same||apiKeyEndpoint(store.dir,scope)===checked.api_url)?readApiKey(store.dir,scope,checked.api_url):null
+        const changeCredential=x.mode==='api'&&(chosenKey?chosenKey!==oldKey:!same)
+        result=x.scope === 'global' ? store.setGlobalSetting(x.mode, model, provider, address) : store.setHarnessSetting(x.harness, x.mode, model, provider, address)
+        if(changeCredential)bindApiKey(store.db,scope,chosenKey?stageApiKey(store.dir,scope,chosenKey,checked.api_url):null)
+        store.db.exec('COMMIT')
+      }catch(error){store.db.exec('ROLLBACK');throw error}
       return { ...result, api_key_configured: store.hasApiCredential(scope) }
     },
     'POST /api/probe': async req => { await body(req); return probeMcp({ env: { ...process.env, SUPERLCM_HOME: store.dir } }) }

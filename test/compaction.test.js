@@ -238,11 +238,14 @@ test('Claude Code writes its own summaries through summary-claim / summary-save,
   const s = new ClaudeStore(home)
   assert.equal(s.hostWriter('s3'), true)
   assert.deepEqual(s.nodeRows('s3', 0).map(n => [n.first, n.last, n.model]), [[0, 1, 'claude-code-host:haiku']])
+  // Prevent the detached background worker from racing the synthetic worker
+  // lease below; a separate test covers scheduling after handoff.
+  s.setHarnessSetting('claude-code','off')
   s.close()
   assert.deepEqual(run('summary-handoff'), {}) // the end of the session: the separate worker takes over
   const t = new ClaudeStore(home); assert.equal(t.hostWriter('s3'), false)
   // A separate worker's lease is its own: a refused save or a handoff from the conversation leaves it alone.
-  assert.equal(t.lease('s3', 300000, 'worker:1'), true); t.close()
+  assert.equal(t.lease('s3', 300000, 'worker:1'), true); t.setHarnessSetting('claude-code','cli','haiku'); t.close()
   run('summary-host')
   assert.deepEqual(run('summary-save', JSON.stringify({ batch_id: 'nope', summary: 'x'.repeat(30) })), { error: 'no summary claimed in this conversation' })
   run('summary-handoff')

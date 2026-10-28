@@ -1,6 +1,7 @@
 import { fitSummary, repairSummaryPrompt } from '../src/summary-fitting.js'
 import { checkedSummary } from '../src/summary-policy.js'
 import {rescueClaude,discardClaudeRescue} from './claude-rescue.js'
+import {bodies} from '../src/claude-live-messages.js'
 // A Claude Code module (2.1.286+), two jobs:
 // 接管压缩: when the main conversation compacts, SuperLcm answers with its own summaries plus the newest
 // messages word for word (see src/compaction.js). Anything unexpected, the setting being off, a subagent, or
@@ -139,7 +140,7 @@ function summaryTick($,id) {
   void Promise.resolve().then(()=>$.session.usage()).then(u=>['--tokens',String(u?.context?.tokens||0),'--window',String(u?.context?.window||0)],()=>[])
     .then(flags=>cli($,'summary-tick',id,'',{flags})).then(reply=>{if(reply.host&&!ended.has(id))return writeSummaries($,id)}).catch(()=>{}).finally(()=>ticking.delete(id))
 }
-const toInput = messages => messages.map(m => ({ role: m.role, text: m.text.slice(0, 2000), toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolResults: m.toolResults?.length ? 1 : 0, size: m.text.length + JSON.stringify(m.toolUses || []).length + JSON.stringify(m.toolResults || []).length + 200 }))
+const toInput = messages => messages.map(m => ({ role: m.role, text: m.text, toolUses:(m.toolUses||[]).map(t=>({tool_use_id:t.tool_use_id||t.id||t.call_id})),toolResultIds:m.toolResultIds||(m.toolResults||[]).map(t=>t.tool_use_id||t.id||t.call_id).filter(Boolean),toolBodies:bodies(m),toolResults: m.toolResults?.length ? 1 : 0, size: m.text.length + JSON.stringify(m.toolUses || []).length + JSON.stringify(m.toolResults || []).length + 200 }))
 async function packet($, id, messages, instructions, trigger, extra = {}) {
   const usage = await $.session.usage()
   const input = JSON.stringify({ messages: toInput(messages), instructions: instructions || '', trigger, tokens: usage.context.tokens || 0, window: usage.context.window || 0,...extra })

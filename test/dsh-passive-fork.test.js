@@ -5,6 +5,46 @@ import {MainArchiveFork} from '../dsh/main-archive-fork.js'
 import {forkScope} from '../dsh/fork-scope.js'
 import {captureDshPacket,projectDshEvent,dshSessionKey} from '../src/dsh.js'
 import {ClaudeStore} from '../src/store.js'
+import {summarizeArchiveFork} from '../dsh/archive-fork.js'
+
+function idleFixture(stream){
+ const message={id:'synthetic-message',role:'user',content:[{type:'text',text:'Please preserve the original request.'}]}
+ const event={seq:0,type:'user/message',data:{content:message.content}},session={eventAt:()=>event,deriveEventMessage:()=>message}
+ const request={provider:'offline',model:'offline',messages:[message],maxTokens:4096},saved=[]
+ const db={nodes:()=>[],sourceRows:()=>[{seq:0,event:JSON.stringify(event),tokens:100,text:'Please preserve the original request.'}],saveTree:(...args)=>saved.push(args)}
+ const ctx={sessions:new Map([['synthetic',session]]),tokenMeter:{measure:()=>({totalTokens:75000})},llm:{resolveModelInfo:async()=>({context:{contextWindow:100000},defaultMaxTokens:4096}),stream}}
+ return {service:{ctx,db,file:'/synthetic',forkRequests:new Map([['synthetic',request]])},doc:{revision:'r',settings:{compressionRatio:.8,chunkTokens:2000,fanout:4,forkModelOverride:false}},saved}
+}
+const flush=async()=>{for(let i=0;i<30;i++)await new Promise(resolve=>setImmediate(resolve))}
+
+test('passive DSH summary keeps running while it produces meaningful output',async t=>{
+ const gates=[],f=idleFixture(options=>(async function*(){
+  const prompt=options.messages.at(-1).content.map(b=>b.text||'').join(''),plan=JSON.parse(prompt.split('\n').find(x=>x.startsWith('[{"index":')))
+  const body=JSON.stringify({blocks:plan.map(n=>({index:n.index,summary:'# State\nPreserve the original request.'}))})
+  yield {type:'text-delta',text:body.slice(0,1)}
+  for(let i=0;i<2;i++){await new Promise(resolve=>gates.push(resolve));yield {type:'reasoning-delta',text:'still working'}}
+  yield {type:'text-delta',text:body.slice(1)};yield {type:'finish',reason:{kind:'stop'}}
+ })())
+ t.mock.timers.enable({apis:['setTimeout','Date']})
+ try{
+  const pending=summarizeArchiveFork(f.service,'synthetic',f.doc,'owner',new AbortController().signal)
+  await flush();assert.equal(gates.length,1)
+  for(let i=0;i<2;i++){t.mock.timers.tick(540000);gates.shift()();await flush()}
+  assert.equal(await pending,'complete');assert.equal(f.saved.length,1)
+ }finally{t.mock.timers.reset();for(const release of gates)release()}
+})
+
+test('passive DSH summary aborts after ten minutes without meaningful progress',async t=>{
+ let release,started=false
+ const f=idleFixture(()=>(async function*(){yield {type:'text-delta',text:'{'};started=true;await new Promise(resolve=>release=resolve)})())
+ t.mock.timers.enable({apis:['setTimeout','Date']})
+ try{
+  const pending=summarizeArchiveFork(f.service,'synthetic',f.doc,'owner',new AbortController().signal)
+  const failure=assert.rejects(pending,error=>error.name==='TimeoutError')
+  await flush();assert.equal(started,true);t.mock.timers.tick(600001);await failure
+  assert.equal(f.saved.length,0)
+ }finally{t.mock.timers.reset();release?.()}
+})
 test('integrated DSH archives a complete native fork tree with takeover off',async()=>{
  const h=await lab({capacity:64000,config:{auto:false,summaryMode:'main-fork'}}),store=new ClaudeStore(h.dir);let forks
  try{

@@ -19,7 +19,6 @@ import {publishForkArchive,withForkLease,forkArchiveSnapshot} from './archive-fo
 import {assembleRegions} from './assembled-region.js'
 import {markerFromSummary} from './marker.js'
 import { dshSummaryLanguage } from './dsh-summary-language.js'
-import {assembledCheckpointMessage} from './assembled-region.js'
 import {stripRecallMetadata,contentBlocksToText} from './marker.js'
 
 export function captureMainRequest(engine, agent, options) {
@@ -98,17 +97,16 @@ async function runMainFork(engine,agent,prepared,signal,capture,policy,retry,pro
       built.push({...part,summary:old.summary,checkpointMessage:agent.session.eventAt(part.start).data,compactionId:old.compactionId,provider:old.provider,model:old.model,trustedChildNodeIds:old.childIds,treeKind:old.kind||'leaf',depth:nodeLevel(engine.superLcmStore,agent.session.id,old.nodeId)})
       continue
     }
-    if(children.length&&new Set(children.map(p=>p.depth)).size>1&&engine.ctx.tokenMeter.estimateMessage(assembledCheckpointMessage(children).checkpointMessage)<=policy.summaryPrefixTargetTokens){
-      block.modelSummary??=block.summary;block.kind='assembled'
-    }
     const part=block.level===0?parts[block.index]:assembleRegions(engine,children)
     const childIds=block.level===0?part.trustedChildNodeIds:children.map(p=>markerFromSummary(p.summary).id)
     const compactionId=randomUUID()
-    const summary=block.kind==='assembled'?assembledCheckpointMessage(children).summary:appendRecallEnvelope([{type:'text',text:block.summary}],{id:randomUUID(),children:childIds})
+    // A model-written parent can contain facts absent from its children.
+    // Keep the actual parent even when child checkpoints have different depths.
+    const summary=appendRecallEnvelope([{type:'text',text:block.summary}],{id:randomUUID(),children:childIds})
     const checkpointMessage=createUserMessage({content:[{type:'text',text:CHECKPOINT_PREAMBLE+'\n\n<compacted-summary>'},...summary,{type:'text',text:'</compacted-summary>'}],source:compactCheckpointSource(compactionId)})
     built.push({...part,summary,checkpointMessage,compactionId,provider:request.provider,model:request.model,
       trustedChildNodeIds:childIds,treeKind:block.kind,
-      usage:block.index===0?usage:{},depth:block.level===0?1+Math.max(0,...childIds.map(id=>nodeLevel(engine.superLcmStore,agent.session.id,id))):(block.kind==='assembled'?0:1)+Math.max(...children.map(p=>p.depth)),rawOutput:block.index===0?raw:undefined})
+      usage:block.index===0?usage:{},depth:block.level===0?1+Math.max(0,...childIds.map(id=>nodeLevel(engine.superLcmStore,agent.session.id,id))):1+Math.max(...children.map(p=>p.depth)),rawOutput:block.index===0?raw:undefined})
   }
   built.at(-1).usage=usage;built.at(-1).rawOutput=raw
   const allTree=built.map(draftNode),tree=allTree.filter((n,i)=>!built[i].carried),frontier=[built.at(-1)]

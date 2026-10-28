@@ -5,6 +5,8 @@ const LANGS = {
   zh: { '关闭（摘要方式）': '关闭' },
   en: {
     "原文搜索尚未完成，请缩小到一个对话后继续检索。": "Original search is incomplete. Narrow it to one conversation to continue.",
+    "原文搜索尚未完成，请继续加载。": "Original search is incomplete. Load more to continue.",
+    "部分原文暂时无法读取。": "Some original records could not be read.",
     "压缩设置已变化，请重新读取后保存": "Compaction settings changed. Reload them before saving.",
     "所有工具共用这份粒度设置。只影响之后新生成的摘要，已有摘要保持不变。": "All tools share these granularity settings. They apply to new summaries only; existing summaries stay unchanged.",
     "最近原文保留量必须在 5K 到 200K 之间": "Keep recent originals must be between 5K and 200K tokens.",

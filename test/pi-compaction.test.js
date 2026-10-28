@@ -45,6 +45,20 @@ test('completed Pi pieces are reused on retries but not after model settings cha
   f.store.setHarnessSetting('pi', 'api', null, null, null, m.id)
   await run(); assert.equal(calls, 2)
 })
+test('a non-shrinking merge is regenerated on retry while successful source pieces are reused',async t=>{
+  const f=fixture(t);let leaves=0,merges=0
+  const input={...f.input,tokensBefore:1000,source:'Historical source record. '.repeat(2000)}
+  const large='# State\n'+'保留证据。'.repeat(600)
+  const summarize=async(_source,{summaryTask})=>{
+    if(summaryTask.level===0){leaves++;return large}
+    merges++
+    return merges===1?large:'# State\nThe historical inspection remains unfinished.'
+  }
+  await assert.rejects(compactPi(f.store,input,{env:f.env,summarize}),/未能缩短/)
+  const result=await compactPi(f.store,input,{env:f.env,summarize})
+  assert.equal(leaves,1);assert.equal(merges,2);assert.equal(result.details.cached,1)
+  assert.match(result.summary,/unfinished/)
+})
 test('Pi rejects a wrong branch boundary, deleted capture and missing API before any model call', async t => {
   const f = fixture(t); let calls = 0
   const options = { env: f.env, summarize: async () => { calls++; return summary } }
@@ -596,13 +610,12 @@ for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'
  const goal=Math.floor(total/1.07),limit=fault==='tree'?total-1:Math.max(1024,total+1)
  if(fault==='missing')tree.pop()
  const staged=stagePi(f.store,f.input,{env:f.env})
+ if(!fault)f.store.apiCredential=()=>{throw Error('the native branch must not read an unrelated API credential')}
  const input={...f.input,draftKey:'b'.repeat(64),forkRevision:staged.revision,forkSummary:{
   model:'fixture-main',provider:'fixture',sourceDigest:forkHash(f.input.source),prefixHash:'prefix',requestSettingsHash:'settings',usage:{cacheRead:9000},
   blocks:leaves,tree,treeOptions:{fanout:4,targetTokens:limit}}}
  const options={env:f.env,summarize:async()=>{throw Error('must not regenerate a completed tree')}}
- if(fault==='root'){
-  const prepared=await preparePi(f.store,input,options);assert.ok(prepared.compaction.details.summaryTree.at(-1).modelSummary);assert.ok(prepared.compaction.summary.length<tree.at(-1).summary.length)
- }else if(fault){
+ if(fault){
   await assert.rejects(preparePi(f.store,input,options),fault==='missing'?/层级缺失/:fault==='root'?/摘要仍超出预算/:/总输出预算/)
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM pi_prepared_compactions').get().n,0)
   assert.equal(f.store.nodeRows('pi-pi-test',0).length,0)
@@ -617,6 +630,11 @@ for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'
   assert.equal(f.store.nodeRows('pi-pi-test',1).length,1)
   assert.deepEqual(await preparePi(f.store,input,options),prepared)
   assert.deepEqual(readPreparedPi(f.store,input,{env:f.env}),prepared)
+  const currentRevision=prepared.compaction.details.summaryRevision
+  const oldRevision=forkHash(['pi-main-fork-tree-v2',readPiPolicy(f.store.dir)])
+  f.store.db.prepare('UPDATE pi_prepared_compactions SET revision=? WHERE session=? AND draft_key=?').run(oldRevision,'pi-pi-test',input.draftKey)
+  assert.equal(readPreparedPi(f.store,input,{env:f.env}),null,'a fork prepared under the old tree semantics cannot be installed')
+  f.store.db.prepare('UPDATE pi_prepared_compactions SET revision=? WHERE session=? AND draft_key=?').run(currentRevision,'pi-pi-test',input.draftKey)
   const obsolete={...prepared.compaction,summary:'# Obsolete prepared result\n'+'pending '.repeat(20000)}
   f.store.db.prepare('UPDATE pi_prepared_compactions SET compaction=? WHERE session=? AND draft_key=?').run(JSON.stringify(obsolete),'pi-pi-test',input.draftKey)
   assert.equal(readPreparedPi(f.store,input,{env:f.env}),null)

@@ -55,7 +55,9 @@ async function host(run,{mode='success',dir=mkdtempSync(join(tmpdir(),'sl-faults
   }
   try {
     new SessionStore(ctx);new SessionProjections(ctx);new Llm(ctx);ctx.llm.registerAdapter(['offline','backup'],new Offline());new TokenMeter(ctx)
-    h.engine=new Engine(ctx,{...configuration,archiveHome:dir})
+    // The cancellation case must cancel an active attempt, not race the
+    // separate 60ms timeout fixture under a loaded test runner.
+    h.engine=new Engine(ctx,{...configuration,...(mode==='cancel'?{summaryTimeoutMs:10000}:{}),archiveHome:dir})
     await tick()
     if(seed){h.agent={session:ctx.sessions.create('fault-test',{meta:{id:'fault-test',version:4,createdAt:1,isSeeded:false,cwd:'/fixture'},seed,eventState:'detached'}),options:{provider:'offline',model:'main',maxTokens:1024}}}
     else {

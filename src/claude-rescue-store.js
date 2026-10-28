@@ -17,6 +17,8 @@ const rowFor=(store,session,id)=>store.db.prepare('SELECT * FROM claude_compacti
 function valid(store,session,row,{claimId,deadline=true,cancelId}={}) {
   if(!row||!['generating','ready','saved'].includes(row.state)||claimId&&row.claim_id!==claimId||deadline&&row.state==='generating'&&Date.now()>=row.deadline_ms)return false
   const p=JSON.parse(row.preparation)
+  // Older prepared rescues may have skipped images or unverified tool data.
+  if(p.evidenceVersion!==2)return false
   if(rescueCancelled(store.dir,session,row.claim_id,p.cancelId,cancelId))return false
   if(!store.source(session)||store.isDeleted(session)||!store.integrationEnabled('claude-code')||!store.takeover().enabled||store.metadata(session).harness!=='claude-code')return false
   if(row.revision!==summarySettingsRevision(store,session)||p.settingHash!==rescueHash(store.takeover())||p.sourceHash!==rescueSourceHash(store,session,p.through))return false
@@ -49,7 +51,8 @@ export function prepareClaudeRescue(store,session,input) {
   if(!work)return {use:false}
   const p=work.preparation,old=rowFor(store,session,p.nodeId)
   if(old&&valid(store,session,old,{deadline:false})&&['ready','saved'].includes(old.state))return publish(store,session,old,input.cancel_id)
-  if(old?.state==='generating'&&Date.now()<old.deadline_ms||old?.failed_until>Date.now())return {use:false,busy:true}
+  if(old?.state==='generating'&&Date.now()<old.deadline_ms&&valid(store,session,old,{deadline:false})||
+    old?.state==='failed'&&old.failed_until>Date.now()&&JSON.parse(old.preparation).evidenceVersion===2)return {use:false,busy:true}
   const claimId=randomUUID(),deadline=Date.now()+90000,revision=summarySettingsRevision(store,session)
   store.db.prepare(`INSERT INTO claude_compaction_rescues VALUES(?,?,?,?,?,?,?,NULL,0)
     ON CONFLICT(session,node_id) DO UPDATE SET claim_id=excluded.claim_id,state=excluded.state,deadline_ms=excluded.deadline_ms,revision=excluded.revision,preparation=excluded.preparation,summary=NULL,failed_until=0`)

@@ -11,12 +11,14 @@ export function claudeCheckpoints(store,session) {
   return rows.flatMap(n=>{
     const p=JSON.parse(n.preparation)
     if(rescueSourceHash(store,session,n.last)!==p.sourceHash)return []
-    return [{...n,checkpoint:true,rescueRequest:p.request||null}]
+    return [{...n,checkpoint:true,rescueRequest:p.request||null,sourceIncomplete:store.nodeSourceIncomplete(session,n)}]
   })
 }
 export function claudeCompactionNodes(store,session) {
   const roots=claudeCheckpoints(store,session),ids=new Set(roots.map(n=>n.id))
-  return [...store.db.prepare('SELECT * FROM nodes WHERE session=?').all(session).filter(n=>!n.id.startsWith('claude-rescue-')||ids.has(n.id)).map(n=>roots.find(r=>r.id===n.id)||n)]
+  return store.db.prepare('SELECT * FROM nodes WHERE session=?').all(session)
+    .filter(n=>!n.id.startsWith('claude-rescue-')||ids.has(n.id))
+    .map(n=>({...roots.find(r=>r.id===n.id)||n,sourceIncomplete:store.nodeSourceIncomplete(session,n)}))
 }
 
 // A checkpoint can summarize old summary children and a directly read raw suffix.

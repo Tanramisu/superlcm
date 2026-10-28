@@ -13,7 +13,7 @@ You can delete a conversation from the console, and removing the folder removes 
 Only summary writing can send conversation text anywhere, and only to a model you have chosen, in the mode you pick per tool:
 
 - **Main-model background branch** (default): a separate branch uses the conversation’s model and configured account to prepare a summary tree. The active conversation continues while it is prepared. A model override uses the selected tool’s model and account configuration.
-- **Legacy tool CLI** (preserved explicit settings): a short background run of Claude Code, Codex, Pi or dsh sends excerpts to that tool's model provider under the account you already signed in with.
+- **Legacy tool CLI** (preserved explicit settings): a short background run of Claude Code, Codex or Pi sends excerpts to that tool's model provider under the account you already signed in with.
 - **Custom API**: excerpts are sent to the endpoint you enter, with the key you enter. A local endpoint such as `http://127.0.0.1` stays on your computer.
 - **Off**: nothing is sent; conversations are still saved and searchable.
 
