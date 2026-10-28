@@ -5,6 +5,77 @@ import {lab,history,send,close,count,checkpoint,until} from './reliability/lab.m
 import {forkScope} from '../dsh/main-fork.js'
 import {ROLLING_DEFAULTS} from '../dsh/engine-config.js'
 import {controlsConfig} from '../dsh/controls-config.js'
+import {currentPolicy,activeInputTokens} from '../dsh/ratio-runtime.js'
+
+test('a later adapter override cannot send an oversized foreground request',async()=>{
+ const h=await lab({capacity:500000,maxTokens:128000,config:{summaryMode:'main-fork'}})
+ try{
+  history(h,.78)
+  const prepare=h.ctx.llm.prepareCall.bind(h.ctx.llm)
+  h.ctx.llm.prepareCall=(config,signal)=>prepare({...config,maxTokens:128000},signal)
+  const errors=await send(h,'KEEP THIS INPUT WHEN ANOTHER SETTING OVERRIDES OUTPUT CAPACITY')
+  assert.ok(errors.length)
+  assert.equal(h.main.length,0,'foreground cannot bypass the real output reservation')
+  assert.equal(count(h,'compaction/summary'),0)
+  assert.ok(h.agent.session.snapshotEvents().some(e=>JSON.stringify(e).includes('KEEP THIS INPUT')))
+ }finally{await close(h)}
+})
+
+test('a late 425K start limits only branch output and still replaces without trimming the prefix',async()=>{
+ const h=await lab({capacity:500000,maxTokens:128000,config:{summaryMode:'main-fork'}})
+ const original=h.ctx.llm.stream.bind(h.ctx.llm),branches=[]
+ try{
+  history(h,.85)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches.push(options)
+   const prompt=options.messages.at(-1).content.map(b=>b.text||'').join('')
+   const plan=JSON.parse(prompt.split('\n').find(line=>line.startsWith('[{"index":')))
+   yield {type:'text-delta',index:0,text:JSON.stringify({blocks:plan.map(p=>({index:p.index,summary:'# Historical state\nPreserve decisions, constraints and pending work.'}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  await send(h,'KEEP CURRENT INPUT DURING LATE PREPARATION')
+  assert.equal(branches.length,1);assert.equal(count(h,'compaction/summary'),1)
+  assert.ok(branches[0].maxTokens<98976)
+  const header=h.agent.session.snapshotEvents().find(e=>e.type==='request/header'&&e.data.header.config.maxTokens===98976)
+  assert.ok(header)
+  assert.ok(h.main.at(-1).content.includes('KEEP CURRENT INPUT DURING LATE PREPARATION'))
+ }finally{await close(h)}
+})
+
+test('500K window prepares at 350K and replaces at 400K with a configured 128K output ceiling',async()=>{
+ const h=await lab({capacity:500000,maxTokens:128000,config:{summaryMode:'main-fork'}})
+ const original=h.ctx.llm.stream.bind(h.ctx.llm);let branches=0,closed=false
+ try{
+  history(h,.696)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches++
+   const prompt=options.messages.at(-1).content.map(b=>b.text||'').join('')
+   const plan=JSON.parse(prompt.split('\n').find(line=>line.startsWith('[{"index":')))
+   yield {type:'text-delta',index:0,text:JSON.stringify({blocks:plan.map(p=>({index:p.index,summary:'# Historical state\nPreserve constraints and pending work; originals remain available.'}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  await send(h,'STILL BELOW PREPARATION')
+  assert.equal(branches,0)
+  const p=currentPolicy(h.engine,h.agent)
+  assert.equal(p.prepareActiveTokens,350000);assert.equal(p.softActiveTokens,400000)
+  assert.ok(activeInputTokens(h.engine,h.agent)<350000)
+  await send(h,'CROSS PREPARATION '+ 'x'.repeat(18000))
+  await h.engine.settleBackgroundFold(h.agent)
+  assert.equal(branches,1);assert.equal(count(h,'compaction/summary'),0)
+  await send(h,'STILL BELOW REPLACEMENT '+ 'x'.repeat(120000))
+  assert.ok(activeInputTokens(h.engine,h.agent)<400000)
+  assert.equal(count(h,'compaction/summary'),0)
+  await send(h,'CROSS REPLACEMENT AND KEEP EXACT '+ 'x'.repeat(80000))
+  assert.equal(count(h,'compaction/summary'),1);assert.equal(branches,1)
+  assert.ok(h.main.at(-1).content.includes('CROSS REPLACEMENT AND KEEP EXACT'))
+  assert.equal(h.agent.options.maxTokens,128000,'user configuration stays intact')
+  assert.equal(h.agent.session.requestHeader().config.maxTokens,98976)
+  assert.ok(h.main.every(r=>r.inputTokens+r.maxTokens<500000))
+  const session=h.agent.session
+  await close(h);closed=true
+  assert.equal(session.requestHeader().config.maxTokens,128000,'shutdown restores configured ceiling')
+ }finally{if(!closed)await close(h)}
+})
 
 for(const stalled of [false,true])test('native fork '+(stalled?'still stops at its longer deadline':'can finish after the former three-minute deadline'),async t=>{
  const deadline=controlsConfig({auto:true,summaryMode:'main-fork'}).summaryTimeoutMs
@@ -52,7 +123,7 @@ for(const stalled of [false,true])test('native fork '+(stalled?'still stops at i
 for(const failure of [false,true])test('real DSH main branch: '+(failure?'summary failure blocks capacity':'one background call, source blocks and append-only replacement'),async()=>{
  const h=await lab({capacity:64000,config:{summaryMode:'main-fork',summaryTimeoutMs:300,summaryRetryCooldownMs:1000}})
  try {
-  history(h,failure?.94:.72)
+  history(h,failure?.91:.72)
   const original=h.ctx.llm.stream.bind(h.ctx.llm),branches=[],requests=[]
   let release
   const barrier=new Promise(resolve=>release=resolve)
@@ -107,7 +178,7 @@ for(const failure of [false,true])test('real DSH main branch: '+(failure?'summar
 for (const fault of ['truncated','tool-call','cancelled']) test('DSH branch refuses '+fault+' and keeps every original',async()=>{
  const h=await lab({capacity:64000,config:{summaryMode:'main-fork',summaryTimeoutMs:300,summaryRetryCooldownMs:1000}})
  try {
-  history(h,.94)
+  history(h,.91)
   const original=h.ctx.llm.stream.bind(h.ctx.llm)
   h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
     if(fault==='truncated'){yield {type:'text-delta',index:0,text:'{"blocks":[]}'};return}

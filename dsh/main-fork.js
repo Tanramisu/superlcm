@@ -62,8 +62,13 @@ async function runMainFork(engine,agent,prepared,signal,capture,policy,retry) {
     ? '\nThe previous attempt failed output validation. Return only the required JSON object, include every planned leaf and parent exactly once in index order, start each summary with a heading in the requested language, and respect the single shared output budget. Do not call tools or continue the task.' : ''
   const directive = forkDirective(plan,target,language.name,treeOptions)+correction
   const directiveTokens = engine.ctx.tokenMeter.estimateMessage(createUserMessage({content:[{type:'text',text:directive}]}))
-  if (prepared.activeTokens + directiveTokens >= Math.min(policy.inputBudget,route.inputBudget??Infinity) - 1024) throw Object.assign(Error('DSH 后台分支没有足够输入空间，原文保留'),{code:'SUPERLCM_FORK_CAPACITY'})
-  const options = {...request,messages:[...request.messages,createUserMessage({content:[{type:'text',text:directive}]})]}
+  const remaining=Math.min(policy.contextWindow,route.contextWindow??Infinity)-prepared.activeTokens-directiveTokens-1024
+  if(remaining<1024)throw Object.assign(Error('DSH 后台分支没有足够输入空间，原文保留'),{code:'SUPERLCM_FORK_CAPACITY'})
+  // A late start/restart can already be past the normal preparation point.
+  // Keep the entire frozen prefix; only limit auxiliary output to make room
+  // for the appended directive instead of retrying an impossible reservation.
+  const maxTokens=Math.min(request.maxTokens??16384,Math.floor(remaining))
+  const options = {...request,maxTokens,messages:[...request.messages,createUserMessage({content:[{type:'text',text:directive}]})]}
   const archiveSnapshot=forkArchiveSnapshot(engine.superLcmStore.path)
   const raw = [], usage = {}; let text = ''
   await withForkLease(engine.superLcmStore.path,agent.session.id,policy.signature||'main-fork',signal,leasedSignal=>summaryAttempt(abort=>forkScope.run(true,async()=>{

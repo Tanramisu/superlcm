@@ -43,7 +43,7 @@ export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=fa
   const window=info.context?.contextWindow,reserve=request.maxTokens??info.defaultMaxTokens??0
   if(!Number.isSafeInteger(window)||window<=reserve)throw Error('聊天模型缺少上下文容量，原文保留')
   const inputBudget=window-reserve,measurement=service.ctx.tokenMeter.measure(session)
-  if(!force&&measurement.totalTokens<inputBudget*(Math.round((doc.settings.compressionRatio-.1)*1e12)/1e12))return 'below-preparation-threshold'
+  if(!force&&measurement.totalTokens<window*(Math.round((doc.settings.compressionRatio-.1)*1e12)/1e12))return 'below-preparation-threshold'
   const byId=new Map(request.messages.map((message,index)=>[message.id,{message,index}]))
   const covered=new Set(service.db.nodes(id).filter(n=>n.level===0).flatMap(n=>n.sources))
   const selected=service.db.sourceRows(id).filter(row=>{

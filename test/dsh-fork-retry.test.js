@@ -17,7 +17,7 @@ test('native fork retries beyond ten total minutes and five failures while the a
  let release,pending,settled=false
  const barrier=new Promise(resolve=>release=resolve)
  try{
-  history(h,.94)
+  history(h,.91)
   h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
    const attempt=branches.length
    branches.push(options)
@@ -98,7 +98,7 @@ for(const cancellation of ['user','settings','model','source','dispose'])test('n
  const original=h.ctx.llm.stream.bind(h.ctx.llm)
  let branches=0,pending
  try{
-  history(h,.94)
+  history(h,.91)
   h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){branches++;throw Error('Synthetic transport failure')})()
   t.mock.timers.enable({apis:['setTimeout']})
   pending=send(h,'CURRENT INPUT SURVIVES CANCELLATION',{timeout:10000000})

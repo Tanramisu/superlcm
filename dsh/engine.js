@@ -1,5 +1,6 @@
 import { summarizeMainFork } from './main-fork.js'
 import {retryFork} from './fork-retry.js'
+import {registerOutputBudget} from './output-budget.js'
 import {SUMMARY_POLICY_VERSION} from '../src/summary-policy.js'
 import { randomUUID } from 'node:crypto'
 import { nativePreStep, registerRequestBoundary } from './request-boundary.js'
@@ -96,6 +97,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     registerRequestBoundary(this)
     this.watchVolatileConfig(ctx)
     watchControls(this,ctx,config.controlFile,controls)
+    registerOutputBudget(this,this.superLcmStore,{context:ctx})
     if(config.controlFile&&!this.config.auto)this._registerAutomaticCompaction()
   }
 

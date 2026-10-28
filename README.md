@@ -57,6 +57,8 @@ Before the normal preparation point, SuperLcm archives originals. At preparation
 
 With DSH takeover and main-model branches, each attempt defaults to a ten-minute deadline. Failures retry automatically in the background with increasing waits, capped at five minutes between attempts; there is no overall retry time or attempt limit. At the capacity guard, the current request stays saved and paused until a validated summary can replace the selected source. User cancellation, settings or model changes, source invalidation, and engine shutdown cancel the old job. Invalid or late results never replace originals.
 
+DSH ratios use the full model context window: a 500K window prepares at 350K and replaces at 400K with the default ratios. Output reservation does not reduce those thresholds. During takeover, the native request waterfall limits the effective output ceiling to leave safe space at replacement; the configured ceiling is preserved separately and restored when takeover ends. If preparation is still retrying at the capacity guard, the current request waits.
+
 ## Optional compaction takeover for Claude Code
 
 Claude Code takeover uses its configured replacement threshold, 300K tokens by default, with preparation scheduled before that threshold. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.

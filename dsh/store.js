@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { home as archiveHome } from '../src/store.js'
 import { CompressionReporter } from '../src/compression-status.js'
+import {createOutputBudgetState} from './output-budget.js'
 
 const SCHEMA_VERSION = 4
 
@@ -158,6 +159,7 @@ export class SuperLcmStore {
   }
 
   compressionReporter(options) { return new CompressionReporter(this.#db, options) }
+  outputBudgetState() { return createOutputBudgetState(this.#db) }
 
   archivedSessionIds() {
     if (!this.#db.prepare("SELECT 1 FROM sqlite_master WHERE name='dsh_mirrors'").get()) return []

@@ -10,7 +10,7 @@ for (const fault of ['malformed-json','missing-node','wrong-order','oversized','
     let release, branches=0
     const barrier=new Promise(resolve=>{release=resolve})
     try {
-      history(h,.94)
+      history(h,.91)
       const original=h.ctx.llm.stream.bind(h.ctx.llm)
       h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
         branches++
