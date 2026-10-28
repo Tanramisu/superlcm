@@ -11,7 +11,9 @@ import { piExtension } from '../src/pi.js'
 import { savePiPolicy } from '../src/pi-compaction-policy.js'
 import { readApiKey, saveApiKey } from '../src/api-credentials.js'
 import { findCli } from '../src/runtime.js'
+import { piOutputReserve } from '../src/pi-request.js'
 const mainFork = process.argv.includes('--main-fork')
+const fullWindow=process.argv.includes('--full-window'),scale=fullWindow?5:1,window=100000*scale,maxTokens=fullWindow?128000:1024
 const otherModel=process.argv.includes('--other-model'), ratio50=process.argv.includes('--ratio50')
 assert.ok(!(otherModel||ratio50)||mainFork,'native model/ratio fixtures require --main-fork')
 const passive = process.argv.includes('--passive-only')
@@ -20,9 +22,9 @@ const slow = process.argv.includes('--slow-luna'), fail = process.argv.includes(
 const huge = process.argv.includes('--huge-tool-output'), largeInput = process.argv.includes('--oversized-input')
 const nativePayload = process.argv.includes('--oversized-native-payload'), nativeOutput = process.argv.includes('--oversized-native-output')
 const malformed = process.argv.includes('--malformed-summary'), missing = process.argv.includes('--missing-summary-node'), truncated = process.argv.includes('--truncated-summary')
-const badSummary = malformed || missing || truncated, nativeFault = nativePayload || nativeOutput
+const badSummary = malformed || missing || truncated, nativeFault = nativePayload
 assert.ok(!live || !(slow || fail || cold || huge || largeInput || nativeFault || badSummary), 'fault injection uses only the local endpoint')
-assert.ok(!(nativeFault || badSummary) || mainFork, 'native fork faults require --main-fork')
+assert.ok(!(nativeFault || nativeOutput || badSummary) || mainFork, 'native fork faults require --main-fork')
 assert.ok(!passive || mainFork && !live && !slow && !fail && !nativeFault && !badSummary, 'passive fixture uses the local native branch')
 const agentDir = join(dir, 'agent'), cwd = join(dir, 'work'), sessions = join(agentDir, 'sessions')
 for (const path of [agentDir, cwd, sessions, join(agentDir, 'extensions')]) mkdirSync(path, { recursive: true })
@@ -37,7 +39,7 @@ const aiRoot = join(packageRoot, 'node_modules/@earendil-works/pi-ai/dist')
 const { createAssistantMessageEventStream } = await import(pathToFileURL(join(aiRoot, 'utils/event-stream.js')).href)
 const { fauxAssistantMessage, fauxToolCall } = await import(pathToFileURL(join(aiRoot, 'providers/faux.js')).href)
 const archive = new ClaudeStore(join(dir, 'archive'))
-let server, mainServer, apiCalls = 0, session, mainCalls = 0, readyApiCalls, swapApiCalls, swapEntry, abortedNativeCalls = 0, transportCalls = 0
+let server, mainServer, faultTimer, apiCalls = 0, session, mainCalls = 0, readyApiCalls, swapApiCalls, swapEntry, abortedNativeCalls = 0, transportCalls = 0
 const mainPayloads = [], branchPayloads = []
 let mainStartedResolve
 const mainStarted = new Promise(resolve => { mainStartedResolve = resolve })
@@ -46,6 +48,7 @@ try {
   mainServer = createServer(async (req, res) => {
     transportCalls++
     if (!mainFork) { res.writeHead(500); res.end('unexpected main HTTP request'); return }
+    req.setEncoding('utf8')
     let raw=''; for await (const data of req) raw+=data
     const body=JSON.parse(raw), last=body.messages.at(-1)?.content
     const directive=typeof last==='string'?last:JSON.stringify(last)
@@ -53,6 +56,9 @@ try {
     let content, tool=false, tokens
     if(branch){
       apiCalls++;branchPayloads.push(body)
+      // Main-fork failure now retries indefinitely. Explicit user cancellation
+      // ends this failure-only fixture after the saved foreground turn pauses.
+      if((fail||badSummary)&&!faultTimer)faultTimer=setTimeout(()=>{void session.abort()},500)
       if(fail){res.writeHead(503);res.end('synthetic branch failure');return}
       if(slow)await new Promise(resolve=>setTimeout(resolve,400))
       const plan=JSON.parse(directive.split('\n').find(line=>line.startsWith('[{"index":')))
@@ -62,7 +68,7 @@ try {
     }else{
       mainPayloads.push(body);mainCalls++;mainStartedResolve();tool=mainCalls< (slow?2:3)
       if(mainCalls=== (slow?2:3)){if(!passive)assert.ok(swapEntry);assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'));assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))}
-      tokens=mainCalls===1?(slow||fail||badSummary?95000:(ratio50?49000:79000)):tool?(ratio50?51000:81000):1100
+      tokens=(mainCalls===1?(slow||fail||badSummary?95000:(ratio50?49000:79000)):tool?(ratio50?51000:81000):1100)*scale
       content=tool?null:'合成测试正常结束。'
     }
     const delta=tool?{role:'assistant',tool_calls:[{index:0,id:'call-'+mainCalls,type:'function',function:{name:'background_checkpoint',arguments:'{}'}}]}:{role:'assistant',content}
@@ -82,6 +88,7 @@ try {
     } finally { origin.close() }
   } else {
     server = createServer(async (req, res) => {
+      req.setEncoding('utf8')
       let body = ''; for await (const chunk of req) body += chunk
       assert.equal(JSON.parse(body).model, 'fixture-luna'); apiCalls++
       assert.ok(body.includes('部署必须另行获得用户明确授权'))
@@ -97,12 +104,12 @@ try {
   archive.setHarnessSetting('pi', 'api', null, null, null, model.id); archive.setIntegrationEnabled('pi', true)
   savePiPolicy(archive, { enabled: !passive, ratio: ratio50?.5:.8, ...(mainFork?{summaryMode:'main-fork'}:{}) })
   writeFileSync(join(agentDir, 'extensions/superlcm.ts'), piExtension({ node: process.execPath, script: fileURLToPath(new URL('../src/cli.js', import.meta.url)), home: archive.dir }))
-  if(nativeFault)writeFileSync(join(agentDir,'extensions/00-native-fault.ts'), `export default function(pi){pi.on('before_provider_request',event=>({...event.payload,${nativePayload?"tools:[{type:'function',function:{name:'oversized_tool',description:'中'.repeat(120000),parameters:{type:'object',properties:{}}}}]":"max_tokens:90000"}}))}`)
+  if(nativeFault||nativeOutput)writeFileSync(join(agentDir,'extensions/00-native-fault.ts'), `export default function(pi){pi.on('before_provider_request',event=>({...event.payload,${nativePayload?"tools:[{type:'function',function:{name:'oversized_tool',description:'中'.repeat(120000),parameters:{type:'object',properties:{}}}}]":"max_tokens:90000"}}))}`)
   const manager = sdk.SessionManager.create(cwd, sessions)
   const usage = tokens => ({ input: tokens - 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
   for (let i = 0; i < 8; i++) {
-    manager.appendMessage({ role: 'user', content: `请检查第 ${i} 处。部署必须另行获得用户明确授权。` + '保留准确路径和失败原因。'.repeat(40), timestamp: Date.now() })
-    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: `第 ${i} 处尚未结束。` + '路径为 /tmp/synthetic-project，工具结果回查原文。'.repeat(12) }], api: 'openai-completions', provider: 'fixture-main', model: 'scripted-main', usage: usage(cold ? 95000 : ratio50?40000:70000), stopReason: 'stop', timestamp: Date.now() })
+    manager.appendMessage({ role: 'user', content: `请检查第 ${i} 处。部署必须另行获得用户明确授权。` + '保留准确路径和失败原因。'.repeat(fullWindow?400:40), timestamp: Date.now() })
+    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: `第 ${i} 处尚未结束。` + '路径为 /tmp/synthetic-project，工具结果回查原文。'.repeat(fullWindow?120:12) }], api: 'openai-completions', provider: 'fixture-main', model: 'scripted-main', usage: usage((cold ? 95000 : ratio50?40000:70000)*scale), stopReason: 'stop', timestamp: Date.now() })
   }
   const original = readFileSync(manager.getSessionFile(), 'utf8')
   const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1, keepRecentTokens: 512 }, enableAnalytics: false, enableInstallTelemetry: false })
@@ -110,7 +117,7 @@ try {
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, [])
   const modelsFile=join(agentDir,'models.json')
   if(mainFork){
-    writeFileSync(modelsFile,JSON.stringify({providers:{'fixture-main':{baseUrl:`http://127.0.0.1:${mainServer.address().port}/v1`,api:'openai-completions',apiKey:'synthetic-no-credential',models:[...(otherModel?[{id:'scripted-summary',name:'Scripted summary',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]:[]),{id:'scripted-main',name:'Scripted main',reasoning:false,input:['text'],contextWindow:100000,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}))
+    writeFileSync(modelsFile,JSON.stringify({providers:{'fixture-main':{baseUrl:`http://127.0.0.1:${mainServer.address().port}/v1`,api:'openai-completions',apiKey:'synthetic-no-credential',models:[...(otherModel?[{id:'scripted-summary',name:'Scripted summary',reasoning:false,input:['text'],contextWindow:window,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]:[]),{id:'scripted-main',name:'Scripted main',reasoning:false,input:['text'],contextWindow:window,maxTokens,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}))
   }
   if(otherModel)archive.setHarnessSetting('pi','main-fork','fixture-main/scripted-summary')
   const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: mainFork?modelsFile:null, refreshOnCreate: false })
@@ -131,7 +138,7 @@ try {
     return { content: [{ type: 'text', text: 'LATE_TOOL_RESULT_KEEP_VERBATIM' + (huge ? '巨'.repeat(120000) : '') }], details: {} }
   } }
   const result = await sdk.createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime, customTools: [checkpoint],
-    model: { id: 'scripted-main', name: 'Scripted test model', api: 'openai-completions', provider: 'fixture-main', baseUrl: `http://127.0.0.1:${mainServer.address().port}/v1`, reasoning: false, input: ['text'], contextWindow: 100000, maxTokens: 1024, cost: usage(1000).cost } })
+    model: { id: 'scripted-main', name: 'Scripted test model', api: 'openai-completions', provider: 'fixture-main', baseUrl: `http://127.0.0.1:${mainServer.address().port}/v1`, reasoning: false, input: ['text'], contextWindow: window, maxTokens, cost: usage(1000).cost } })
   session = result.session
   const nativeStream = session.agent.streamFunction
   if(!mainFork) session.agent.streamFunction = (_model, context, options) => {
@@ -182,10 +189,13 @@ try {
   if(mainFork){
     assert.equal(branchPayloads.length,1);assert.equal(apiCalls,1)
     const branch=branchPayloads[0], main=mainPayloads[0]
+    writeFileSync(join(dir,'wire-fixtures.json'),JSON.stringify({branch,main}))
     assert.deepEqual(branch.messages.slice(0,-1),main.messages)
     assert.deepEqual({...branch,messages:[],model:undefined},{...main,messages:[],model:undefined})
     assert.equal(branch.model,otherModel?'scripted-summary':'scripted-main');assert.equal(main.model,'scripted-main')
     assert.equal(swapEntry.details.providerUsage.cacheRead,256)
+    if(fullWindow){assert.equal(piOutputReserve(main),90000);assert.equal(session.model.maxTokens,128000)}
+    if(nativeOutput&&!fullWindow)assert.equal(piOutputReserve(main),18000)
   }
   assert.ok(swapEntry); assert.equal(swapEntry.details.backgroundPrepared, true); assert.equal(swapEntry.details.model, mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model)
   assert.equal(swapEntry.details.replacementModelCalls, 0); assert.equal(swapEntry.fromExtension ?? swapEntry.fromHook, true)
@@ -193,11 +203,12 @@ try {
   assert.equal(mainCalls, slow ? 2 : 3); assert.ok(readFileSync(manager.getSessionFile(), 'utf8').startsWith(original))
   assert.ok(archive.eventRows(key).map(row => archive.exact(key, row.ordinal)).join('').startsWith(original))
   const receipt = { ok: true, directory: dir, installedPi: JSON.parse(readFileSync(join(packageRoot, 'package.json'))).version, backgroundAt: ratio50?'40%':'70%', replacedAt: ratio50?'50%':'80%', mainContinuedDuringPreparation: true,
-    mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal', uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
+    mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal',contextWindow:window,configuredMaxTokens:maxTokens,effectiveMaxTokens:mainFork?piOutputReserve(mainPayloads[0]):undefined, uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
     nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true }
   writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
   }
 } finally {
+  clearTimeout(faultTimer)
   if (session) { await session.extensionRunner?.emit?.({ type: 'session_shutdown' }); session.dispose() }
   mainStartedResolve()
   if (server) await new Promise(resolve => server.close(resolve))

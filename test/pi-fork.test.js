@@ -3,6 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { summarizePiFork } from '../src/pi-fork.js'
 import { forkHash, parseForkSummary } from '../src/fork-summary.js'
+import { estimatePiRequest, limitPiOutput, piCompletionBudget, piOutputReserve, piWindowSafety } from '../src/pi-request.js'
 const first={role:'user',content:'Please inspect /tmp/fixture; never deploy.',timestamp:1}
 const second={role:'assistant',content:[{type:'text',text:'Inspection pending.'}],timestamp:2}
 const messages=[{role:'system',content:'System',toolsAdded:[{name:'read',parameters:{type:'object'}}]},first,second]
@@ -66,4 +67,52 @@ test('Pi checks the entire replayed wire request including tools before sending 
  }}}
  await assert.rejects(summarizePiFork(ctx,snapshot,captured,{stage:async()=>{}}),/最终请求/)
  assert.equal(dispatches,0)
+})
+
+test('a late Pi branch at 400K keeps its exact prefix and reduces only auxiliary output',async()=>{
+ const captured={...capture,model:{...capture.model,contextWindow:500000,maxTokens:128000},payload:{...payload,max_tokens:128000}}
+ let wire
+ const ctx={model:captured.model,modelRegistry:{streamSimple(_m,_c,options){
+  wire=options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:'directive'}]})
+  return {result:async()=>({stopReason:'stop',content:[{type:'text',text:JSON.stringify({blocks:[{index:0,summary:'# State\nInspection pending. Never deploy.'}]})}]})}
+ }}}
+ await summarizePiFork(ctx,{...snapshot,tokensBefore:400000},captured,{stage:async()=>{}})
+ assert.equal(wire.max_tokens,89999)
+ assert.equal(captured.model.maxTokens,128000);assert.equal(captured.payload.max_tokens,128000)
+ assert.deepEqual(wire.messages.slice(0,-1),payload.messages)
+ assert.deepEqual({...wire,messages:[],max_tokens:128000},{...captured.payload,messages:[]})
+})
+
+test('Pi attempt deadline includes a stuck archive stage and fences its late continuation',async()=>{
+ let release,entered,dispatches=0
+ const gate=new Promise(resolve=>release=resolve),started=new Promise(resolve=>entered=resolve)
+ const ctx={model:capture.model,modelRegistry:{streamSimple(){dispatches++;throw Error('late dispatch')}}}
+ const work=summarizePiFork(ctx,snapshot,capture,{stage:()=>{entered();return gate},timeoutMs:20})
+ await started
+ await assert.rejects(work,/timed out/)
+ release();await new Promise(setImmediate)
+ assert.equal(dispatches,0)
+})
+
+test('Pi output limits cover native field aliases without mutating the captured request',()=>{
+ const model={contextWindow:500000,maxTokens:128000}
+ assert.equal(piCompletionBudget(model,.8),90000)
+ assert.equal(piCompletionBudget(model,.5),128000)
+ assert.equal(piWindowSafety(model,.99),2500)
+ const cases=[{max_tokens:128000},{max_completion_tokens:128000},{max_output_tokens:128000},{maxOutputTokens:128000},{maxTokens:128000},{generationConfig:{maxOutputTokens:128000}}]
+ for(const original of cases){
+  const capped=limitPiOutput(original,model,90000)
+  assert.equal(piOutputReserve(capped,model),90000)
+  assert.equal(piOutputReserve(original,model),128000)
+ }
+ for(const [api,payload] of [['openai-responses',{input:[]}],['anthropic-messages',{messages:[]}],['google-generative-ai',{contents:[]}]]){
+  assert.equal(piOutputReserve(limitPiOutput(payload,{...model,api},90000),model),90000)
+ }
+ assert.throws(()=>limitPiOutput({},model,90000),/未声明/)
+ assert.throws(()=>limitPiOutput({max_tokens:NaN},model,90000),/无效/)
+ const conflicting={max_tokens:1000,max_completion_tokens:128000}
+ assert.equal(piOutputReserve(conflicting,model),128000)
+ assert.deepEqual(limitPiOutput(conflicting,model,90000),{max_tokens:1000,max_completion_tokens:90000})
+ assert.throws(()=>limitPiOutput({max_tokens:1000,max_completion_tokens:NaN},model,90000),/无效/)
+ assert.ok(estimatePiRequest({image:{type:'input_image',data:'a'.repeat(100)}})>=8192)
 })

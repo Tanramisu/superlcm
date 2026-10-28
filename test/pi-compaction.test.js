@@ -88,7 +88,7 @@ test('Pi serializer keeps long tool results, failure evidence and call identifie
     { role: 'toolResult', toolCallId: 'call-1', isError: true, content: [{ type: 'text', text }] }])
   assert.ok(output.includes(text)); assert.match(output, /ERROR \/ failed/); assert.match(output, /call-1/)
 })
-function runtime({ tokens = 70000, idle = false, responder, compactEffect, guardTimeoutMs, readPolicy = () => ({ enabled: true, ratio: .8 }) } = {}) {
+function runtime({ tokens = 70000, idle = false, responder, compactEffect, guardTimeoutMs,attemptTimeoutMs,fork, readPolicy = () => ({ enabled: true, ratio: .8 }) } = {}) {
   const handlers = new Map(), commands = [], draft = {}, settings = { compaction: { keepRecentTokens: 512 } }
   const rows = [
     { sourceEntry: { id: 'u1', type: 'message' }, messages: [{ role: 'user', content: 'Original request. ' + 'constraint '.repeat(1000) }] },
@@ -109,7 +109,7 @@ function runtime({ tokens = 70000, idle = false, responder, compactEffect, guard
     if (options.command === 'pi-prepare') { draft.snapshot = input; draft.signal = signal; return pending }
     return Promise.resolve(draft.prepared)
   }
-  api = registerPiCompaction({ on: (name, fn) => handlers.set(name, fn), getSettings: () => settings, registerCommand() {}, appendEntry: (type, data) => deferredInputs.push({ type, data }) }, { home: '/unused' }, { policy: readPolicy, request, guardTimeoutMs })
+  api = registerPiCompaction({ on: (name, fn) => handlers.set(name, fn), getSettings: () => settings, registerCommand() {}, appendEntry: (type, data) => deferredInputs.push({ type, data }) }, { home: '/unused' }, { policy: readPolicy, request, guardTimeoutMs,attemptTimeoutMs,fork })
   const complete = async () => {
     draft.prepared = { draftKey: draft.snapshot.draftKey, compaction: { summary, firstKeptEntryId: draft.snapshot.firstKeptEntryId, tokensBefore: 70000, details: { model: 'fixture-luna' } } }
     resolvePrepare(draft.prepared); await api.getState()?.promise
@@ -117,6 +117,127 @@ function runtime({ tokens = 70000, idle = false, responder, compactEffect, guard
   return { handlers, commands, ctx, rows, api, draft, complete, rejectPrepare, deferredInputs, get compactCalls() { return compactCalls }, get abortCalls() { return abortCalls } }
 }
 const turn = r => r.handlers.get('turn_end')({ entries: [], context: { contextEntries: r.rows } }, r.ctx)
+const tick=()=>new Promise(resolve=>setImmediate(resolve))
+async function until(check){for(let i=0;i<100;i++){if(check())return;await tick()}throw Error('Pi state did not advance')}
+const mainForkPolicy=()=>({enabled:true,summaryEnabled:true,summaryMode:'main-fork',ratio:.8})
+function captureRuntime(r,payload={messages:[{role:'user',content:'captured prefix'}],max_tokens:50000}){
+ r.handlers.get('context_with_system')({messages:r.rows.flatMap(e=>e.messages)},r.ctx)
+ return r.handlers.get('before_provider_request')({payload},r.ctx)
+}
+
+test('Pi 500K window prepares at 350K and only replaces at 400K with a 128K output reservation',async()=>{
+ const r=runtime({tokens:340000,compactEffect:(ctx)=>{ctx.tokens=1000}})
+ try{
+  r.ctx.model.contextWindow=500000;r.ctx.model.maxTokens=128000
+  await turn(r);assert.deepEqual(r.commands,[])
+  r.ctx.tokens=350000;await turn(r);await r.complete()
+  r.ctx.tokens=399999;assert.equal(await turn(r),undefined)
+  const payload={messages:[{role:'user',content:'small'}],max_tokens:128000}
+  const wire=r.handlers.get('before_provider_request')({payload},r.ctx)
+  assert.equal(wire.max_tokens,90000);assert.equal(payload.max_tokens,128000)
+  assert.equal(r.ctx.model.maxTokens,128000);assert.equal(r.abortCalls,0)
+  r.ctx.tokens=400000;assert.equal((await turn(r)).entries[0].type,'compaction')
+ }finally{r.handlers.get('session_shutdown')()}
+})
+
+test('Pi custom replacement above 90% is not pulled back by the default pressure guard',async()=>{
+ const r=runtime({tokens:445000,readPolicy:()=>({enabled:true,ratio:.99})})
+ r.ctx.model.contextWindow=500000;r.ctx.model.maxTokens=128000
+ try{
+  await turn(r);await r.complete()
+  r.ctx.tokens=450000
+  assert.equal(await turn(r),undefined)
+  r.ctx.tokens=495000
+  assert.equal((await turn(r)).entries[0].type,'compaction')
+ }finally{r.handlers.get('session_shutdown')()}
+})
+
+test('Pi retries independently past fifty minutes and keeps pressure waiting until the eighth attempt succeeds',async t=>{
+ let release,settled=false,prepared;const gate=new Promise(resolve=>release=resolve),captures=[]
+ const r=runtime({readPolicy:mainForkPolicy,guardTimeoutMs:20,
+  responder:async(opts,snap)=>opts.command==='pi-stage'?{revision:'fixed'}:opts.command==='pi-prepare'?(prepared={compaction:{summary,firstKeptEntryId:snap.firstKeptEntryId}}):prepared||null,
+  fork:async(ctx,snap,capture,{signal,stage})=>{
+   const n=captures.length;captures.push(capture);await stage()
+   if(n<5)await gate
+   if(n===5)throw Error('quota')
+   if(n===6)throw SyntaxError('malformed summary')
+   return {blocks:[],tree:[]}
+  }})
+ let waiting
+ try{
+  r.ctx.model.maxTokens=50000
+  r.rows[0].messages[0].content='compressible history '.repeat(10000)
+  t.mock.timers.enable({apis:['setTimeout','Date']})
+  captureRuntime(r);await until(()=>captures.length===1)
+  r.ctx.tokens=80000;waiting=turn(r).then(result=>{settled=true;return result})
+  captureRuntime(r,{messages:[{role:'user',content:'NEWER CAPTURE'}],max_tokens:50000})
+  for(let n=1;n<=7;n++){
+   if(n<=5)t.mock.timers.tick(600001)
+   await until(()=>r.api.getState()?.retryAt)
+   assert.equal(settled,false)
+   const current=r.api.getState();assert.equal(current.attempt,n)
+   t.mock.timers.tick(current.retryAt-Date.now())
+   await until(()=>captures.length===n+1)
+  }
+  const result=await waiting
+  assert.equal(result.entries[0].type,'compaction')
+  assert.equal(r.commands.filter(c=>c==='pi-prepare').length,1)
+  assert.ok(captures.every(c=>c===captures[0]),'retry uses one frozen capture')
+  release();await tick()
+  assert.equal(r.commands.filter(c=>c==='pi-prepare').length,1,'late attempts never publish')
+ }finally{r.handlers.get('session_shutdown')();release();t.mock.timers.reset();await waiting}
+})
+
+for(const cancel of ['user','session','model','endpoint','settings','source'])test('Pi retry backoff cancels on '+cancel,async t=>{
+ let calls=0
+ const p=mainForkPolicy()
+ const r=runtime({readPolicy:()=>p,responder:async()=>null,fork:async()=>{calls++;throw Error('transport')}})
+ const controller=new AbortController();r.ctx.signal=controller.signal
+ try{
+  t.mock.timers.enable({apis:['setTimeout','Date']});captureRuntime(r)
+  await until(()=>r.api.getState()?.retryAt)
+  assert.equal(calls,1)
+  if(cancel==='user')controller.abort(Error('user stopped'))
+  else if(cancel==='session')r.handlers.get('session_before_switch')()
+  else if(cancel==='model'){r.ctx.model.id='new-model';r.handlers.get('model_select')({},r.ctx)}
+  else if(cancel==='endpoint'){r.ctx.model.baseUrl='http://127.0.0.1:1';r.handlers.get('model_select')({},r.ctx)}
+  else if(cancel==='settings')p.ratio=.5
+  else r.rows[0].messages[0].content='changed source'
+  await tick();t.mock.timers.tick(10000000);await tick()
+  assert.equal(calls,1);assert.equal(r.api.getState(),null)
+ }finally{r.handlers.get('session_shutdown')();t.mock.timers.reset()}
+})
+
+test('Pi capacity pause preserves background retries but a later user abort stops them',async t=>{
+ let calls=0
+ const r=runtime({readPolicy:mainForkPolicy,responder:async()=>null,fork:async()=>{calls++;throw Error('transport')}})
+ const first=new AbortController();r.ctx.signal=first.signal
+ r.ctx.abort=()=>first.abort(Error('capacity pause'))
+ try{
+  t.mock.timers.enable({apis:['setTimeout','Date']});captureRuntime(r)
+  await until(()=>r.api.getState()?.retryAt)
+  r.handlers.get('before_provider_request')({payload:{max_tokens:1000,tools:[{description:'中'.repeat(100000)}]}},r.ctx)
+  r.handlers.get('agent_settled')({aborted:true},r.ctx)
+  assert.ok(r.api.getState())
+  const next=r.api.getState().retryAt;t.mock.timers.tick(next-Date.now())
+  await until(()=>calls===2)
+  const second=new AbortController();r.ctx.signal=second.signal
+  r.handlers.get('model_select')({},r.ctx)
+  second.abort(Error('user stop'))
+  await tick();t.mock.timers.tick(10000000);await tick()
+  assert.equal(calls,2);assert.equal(r.api.getState(),null)
+ }finally{r.handlers.get('session_shutdown')();t.mock.timers.reset()}
+})
+
+test('Pi invalid capture waits for a fresh request instead of retrying a stale prefix',async()=>{
+ let calls=0
+ const r=runtime({readPolicy:mainForkPolicy,responder:async()=>null,fork:async()=>{calls++;throw Object.assign(Error('prefix changed'),{code:'SUPERLCM_PI_CAPTURE_INVALID'})}})
+ try{
+  captureRuntime(r);await until(()=>r.api.getState()===null)
+  await turn(r);assert.equal(calls,1)
+  captureRuntime(r);await until(()=>calls===2)
+ }finally{r.handlers.get('session_shutdown')()}
+})
 
 test('background starts before 80% and never blocks the main tool loop or new input', async () => {
   const r = runtime()
@@ -165,7 +286,7 @@ test('background failures retry after cooldown without blocking the current run'
   const r = runtime(), originalNow = Date.now; let now = 0; Date.now = () => now
   try {
     await turn(r); r.rejectPrepare(Error('temporary Luna failure'))
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    await new Promise(resolve=>setImmediate(resolve))
     await turn(r); assert.equal(r.commands.length, 1)
     now = 61000; await turn(r); assert.equal(r.commands.length, 2)
   } finally { Date.now = originalNow; r.handlers.get('session_shutdown')() }
@@ -204,21 +325,22 @@ test('an unshrinkable giant tool result is refused after one bounded restage', a
   assert.equal(writes, 2, 'only one fresh draft may be attempted at the guard')
   assert.equal(r.rows.at(-1).messages[0].content[0].text.length, 120000)
 })
-test('fixed system context and completion reserve can trigger protection before the percentage threshold', async () => {
-  for (const configure of [ctx => { ctx.getSystemPrompt = () => '固'.repeat(100000) }, ctx => { ctx.model.maxTokens = 50000 }]) {
+test('genuinely oversized fixed context still triggers protection before dispatch', async () => {
+  for (const configure of [ctx => { ctx.getSystemPrompt = () => '固'.repeat(100000) }]) {
     const r = runtime({ tokens: 60000, responder: async () => { throw Error('unavailable') } }); configure(r.ctx)
     await turn(r); assert.equal(r.abortCalls, 1); assert.deepEqual(r.commands, ['pi-prepare'])
   }
 })
-test('capacity recovery can prepare and replace before 70% when output reserve needs space', async () => {
+test('a large output reserve cannot move preparation or replacement before their total-window thresholds', async () => {
   const r = runtime({ tokens: 60000 }); r.ctx.model.maxTokens = 50000
   // A previous measured request includes fixed costs. Use a large compressible
   // history so a valid replacement can actually fit the remaining input budget.
   r.rows[0].messages[0].content = 'compressible history '.repeat(10000)
-  const guarded = turn(r)
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(r.commands, ['pi-prepare']); await r.complete()
-  const result = await guarded
+  assert.equal(await turn(r),undefined)
+  assert.deepEqual(r.commands,[])
+  r.ctx.tokens=70000;await turn(r);await r.complete()
+  r.ctx.tokens=79999;assert.equal(await turn(r),undefined)
+  r.ctx.tokens=80000;const result=await turn(r)
   assert.equal(result.entries[0].type, 'compaction'); assert.equal(r.abortCalls, 0)
 })
 test('cold input at capacity is preserved exactly and handled when Luna fails', async () => {
@@ -351,8 +473,10 @@ test('Pi checks the final native tools payload before dispatching a provider req
 
 test('Pi final payload reserves the actual requested output limit in API mode too', () => {
   const r = runtime({ tokens: 1000, readPolicy: () => ({ enabled: true, summaryMode: 'api', ratio: .8 }) })
-  r.handlers.get('before_provider_request')({ payload: { messages: [{ role: 'user', content: '中'.repeat(15000) }], max_tokens: 90000 } }, r.ctx)
-  assert.equal(r.abortCalls, 1)
+  const payload={ messages: [{ role: 'user', content: '中'.repeat(15000) }], max_tokens: 90000 }
+  const result=r.handlers.get('before_provider_request')({payload},r.ctx)
+  assert.equal(result.max_tokens,18000);assert.equal(payload.max_tokens,90000)
+  assert.equal(r.abortCalls, 0)
 })
 
 test('Pi native image payloads count visual tokens instead of encoded image bytes', () => {
@@ -406,11 +530,13 @@ test('Pi late replacement callback cannot clear a new session draft', async () =
 })
 
 test('Pi final payload rejects invalid output reservations and covers native Google settings', () => {
-  for (const fields of [{ max_tokens: NaN }, { max_output_tokens: -1 }, { maxTokens: '1000' }, { generationConfig: { maxOutputTokens: 99000 } }]) {
+  for (const fields of [{ max_tokens: NaN }, { max_output_tokens: -1 }, { maxTokens: '1000' }]) {
     const r = runtime()
     r.handlers.get('before_provider_request')({ payload: { messages: [{ role: 'user', content: '中'.repeat(3000) }], ...fields } }, r.ctx)
     assert.equal(r.abortCalls, 1)
   }
+  const r=runtime(),result=r.handlers.get('before_provider_request')({payload:{messages:[],generationConfig:{maxOutputTokens:99000}}},r.ctx)
+  assert.equal(result.generationConfig.maxOutputTokens,18000);assert.equal(r.abortCalls,0)
 })
 
 test('Pi consecutive summary failures back off and a model change clears the old cooldown', async () => {

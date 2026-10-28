@@ -5,7 +5,7 @@ import { readPiPolicy } from './pi-compaction-policy.js'
 import { makePiSnapshot, snapshotMatches, piSignature, serializePiMessages } from './pi-snapshot.js'
 import { estimateSummaryTokens } from './summary-tokens.js'
 import { abortable, summaryAttempt } from './summary-attempt.js'
-import { estimatePiRequest, piOutputReserve } from './pi-request.js'
+import { estimatePiRequest, piOutputReserve,piWindowSafety,piCompletionBudget,limitPiOutput } from './pi-request.js'
 import { checkedSummary } from './summary-policy.js'
 export { serializePiMessages } from './pi-snapshot.js'
 export { estimatePiRequest } from './pi-request.js'
@@ -35,9 +35,10 @@ export function piCompactRequest({ node, script, home, command = 'pi-prepare' },
 }
 
 export function registerPiCompaction(pi, options, {
-  request = piCompactRequest, policy = () => readPiPolicy(options.home), makeSnapshot = makePiSnapshot, guardTimeoutMs = 180000,
+  request = piCompactRequest, policy = () => readPiPolicy(options.home), makeSnapshot = makePiSnapshot, guardTimeoutMs = 180000,attemptTimeoutMs=600000,fork=summarizePiFork,
 } = {}) {
   let state = null, swapping = null, retryAfter = 0, failures = 0, retrySignature = null, capture = null, requestMessages = null, epoch = 0, sessionController = new AbortController()
+  let activitySignal,activityCleanup,protectionAbort=false
   const settings = () => ({...(pi.getSettings?.() || {}), thinkingLevel:pi.getThinkingLevel?.()})
   const entries = ctx => ctx.sessionManager.buildSessionProjection().entries
   const signature = ctx => piSignature(ctx, policy(), settings())
@@ -52,7 +53,15 @@ export function registerPiCompaction(pi, options, {
     retryAfter = Date.now() + 60000 * 2 ** Math.min(4, failures - 1)
   }
   const clearSnapshot = () => { stop(); clearRetries(); capture = null; requestMessages = null }
-  const reset = () => { epoch++; sessionController.abort(Error('Pi 会话已切换或结束')); sessionController = new AbortController(); clearSnapshot(); swapping = null }
+  const reset = () => { epoch++; activityCleanup?.();activitySignal=undefined;protectionAbort=false;sessionController.abort(Error('Pi 会话已切换或结束')); sessionController = new AbortController(); clearSnapshot(); swapping = null }
+  const bindActivity=ctx=>{
+    const signal=ctx.signal
+    if(!signal||signal===activitySignal)return
+    activityCleanup?.();activitySignal=signal;protectionAbort=false
+    const cancel=()=>{if(!protectionAbort)stop()}
+    signal.addEventListener('abort',cancel,{once:true});activityCleanup=()=>signal.removeEventListener('abort',cancel)
+    if(signal.aborted)cancel()
+  }
   const valid = (ctx, current = entries(ctx)) => state && snapshotMatches(state.snapshot, current, signature(ctx))
   const usage = ctx => ({ tokens: ctx.getContextUsage()?.tokens, window: ctx.model?.contextWindow })
   const reached = (ctx, ratio) => { const u = usage(ctx); return Number.isFinite(u.tokens) && Number.isFinite(u.window) && u.window > 0 && u.tokens >= u.window * ratio }
@@ -60,14 +69,14 @@ export function registerPiCompaction(pi, options, {
     const u = usage(ctx)
     if (!Number.isFinite(u.window) || u.window <= 0) return null
     const reserve = Number.isFinite(ctx.model?.maxTokens) ? Math.max(0, ctx.model.maxTokens) : Math.min(16384, u.window * .1)
-    const inputLimit = Math.max(0, u.window - reserve - Math.max(1024, u.window * .02))
+    const inputLimit = Math.max(0, u.window - piCompletionBudget(ctx.model,policy().ratio,reserve) - piWindowSafety(ctx.model,policy().ratio))
     const whole = estimateSummaryTokens(serializePiMessages(current.flatMap(e => e.messages)))
     const active = pi.getActiveTools?.(), tools = (pi.getAllTools?.() || []).filter(t => !active || active.includes(t.name))
     const declared = estimateSummaryTokens(ctx.getSystemPrompt?.() || '') + estimateSummaryTokens(JSON.stringify(tools))
     // Fixed prompts/tools are not compressible. Never subtract them from the
     // summary budget or pretend that replacing old dialogue removes them.
     const fixed = Math.max(declared, (u.tokens || 0) - whole, 0)
-    return { inputLimit, guard: Math.min(u.window * .9, inputLimit), fixed, estimated: fixed + whole }
+    return { inputLimit, guard: Math.min(u.window * Math.max(.9,policy().ratio), inputLimit), fixed, estimated: fixed + whole }
   }
   const danger = (ctx, current = entries(ctx)) => {
     const c = capacity(ctx, current)
@@ -76,41 +85,72 @@ export function registerPiCompaction(pi, options, {
   const pause = ctx => {
     status(ctx, 'SuperLCM：已暂停，防止上下文超限')
     notice(ctx, '后台摘要未能提供足够空间，已暂停模型请求，原文完整保留。')
-    ctx.abort?.()
+    protectionAbort=!!ctx.signal;ctx.abort?.()
   }
   function prepare(ctx, force = false) {
     try {
+      bindActivity(ctx)
+      if(ctx.signal?.aborted)return
       const p = policy()
       if (!p.enabled&&!p.summaryEnabled) { stop(); status(ctx, undefined); return }
       if (state && !valid(ctx)) stop()
       if (retrySignature && retrySignature !== signature(ctx)) clearRetries()
       if (state || Date.now() < retryAfter || (!force && !reached(ctx, Math.round((p.ratio-.1)*1e12)/1e12))) return
-      if (p.summaryMode === 'main-fork' && !capture) return
+      if (p.summaryMode === 'main-fork' && (!capture||['id','provider','contextWindow','maxTokens','api','baseUrl'].some(key=>capture.model?.[key]!==ctx.model?.[key])||capture.reasoning!==settings().thinkingLevel)) return
       const snapshot = makeSnapshot(ctx, p, settings())
       if (!snapshot) return
-      const current = { snapshot, controller: new AbortController(), ready: null, promise: null }
+      const selectedCapture=capture
+      const current = { snapshot, controller: new AbortController(), ready: null, promise: null,attempt:0 }
       state = current; status(ctx, p.summaryMode === 'main-fork' ? 'SuperLCM：主模型后台分支摘要' : 'SuperLCM：Luna 后台准备摘要')
-      const work = async () => {
-        if (p.summaryMode !== 'main-fork') return request({ ...options, command: 'pi-prepare' }, snapshot, current.controller.signal)
-        const restored = await request({ ...options, command: 'pi-ready' }, {session_id:snapshot.session_id,draftKey:snapshot.draftKey}, current.controller.signal)
+      const work = async signal => {
+        if (p.summaryMode !== 'main-fork') return request({ ...options, command: 'pi-prepare' }, snapshot, signal)
+        const restored = await request({ ...options, command: 'pi-ready' }, {session_id:snapshot.session_id,draftKey:snapshot.draftKey}, signal)
         if (restored?.compaction) return restored
-        const selectedCapture = capture
         let staged
-        const forkSummary = await summarizePiFork(ctx, snapshot, selectedCapture, { signal: current.controller.signal,
-          stage: async () => { staged = await request({ ...options, command: 'pi-stage' }, snapshot, current.controller.signal) } })
+        const forkSummary = await fork(ctx, snapshot, selectedCapture, { signal,
+          stage: async () => { staged = await request({ ...options, command: 'pi-stage' }, snapshot, signal) } })
+        signal.throwIfAborted()
         if (state !== current || !valid(ctx)) throw Error('Pi 后台分支已过期')
-        return request({ ...options, command: 'pi-prepare' }, { ...snapshot, sourceMessages: undefined, forkSummary, forkRevision: staged.revision }, current.controller.signal)
+        return request({ ...options, command: 'pi-prepare' }, { ...snapshot, sourceMessages: undefined, forkSummary, forkRevision: staged.revision }, signal)
       }
-      current.promise = work().then(result => {
+      const run=async()=>{
+        for(;;){
+          current.controller.signal.throwIfAborted()
+          if(state!==current||!valid(ctx))throw Error('Pi 后台分支已过期')
+          current.attempt++;current.retryAt=null
+          try{
+            const result=await summaryAttempt(work,current.controller.signal,attemptTimeoutMs)
+            if(!result?.compaction)throw Error('Pi 后台摘要未返回完整结果，原文保留')
+            if(p.summaryMode==='main-fork'){
+              checkedSummary(result.compaction.summary,{requireHeading:true,maxChars:null})
+              if(result.compaction.firstKeptEntryId!==snapshot.firstKeptEntryId||estimateSummaryTokens(result.compaction.summary)>=estimateSummaryTokens(snapshot.source))throw Error('Pi 后台摘要覆盖或长度无效，原文保留')
+            }
+            return result
+          }catch(error){
+            if(error.code==='SUPERLCM_PI_CAPTURE_INVALID'){
+              if(capture===selectedCapture)capture=null
+              throw error
+            }
+            if(p.summaryMode!=='main-fork'||current.controller.signal.aborted||state!==current||!valid(ctx))throw error
+            failed(ctx)
+            const delay=Math.min(300000,Math.max(0,retryAfter-Date.now()))
+            current.retryAt=Date.now()+delay
+            status(ctx,`SuperLCM：第 ${current.attempt} 次摘要未完成，${Math.ceil(delay/1000)} 秒后自动重试`)
+            await retryDelay(delay,current.controller.signal)
+          }
+        }
+      }
+      current.promise = run().then(result => {
         if (state !== current) return
         if (!valid(ctx)) { stop(); return }
         if (!result?.compaction) throw Error('Pi 后台摘要未返回完整结果，原文保留')
-        current.ready = result; clearRetries(); status(ctx, policy().enabled ? 'SuperLCM：摘要已准备，80% 时替换' : 'SuperLCM：后台摘要已保存')
+        current.ready = result; clearRetries(); status(ctx, policy().enabled ? `SuperLCM：摘要已准备，${Math.round(policy().ratio*100)}% 时替换` : 'SuperLCM：后台摘要已保存')
         if (policy().enabled&&ctx.isIdle() && (reached(ctx, policy().ratio) || danger(ctx))) void swapIdle(ctx)
       }).catch(error => {
         if (state !== current) return
-        state = null; failed(ctx)
+        state = null;if(error.code==='SUPERLCM_PI_CAPTURE_INVALID')clearRetries();else failed(ctx)
         status(ctx, 'SuperLCM：后台准备失败，原文保留'); notice(ctx, error.message)
+        if(error.code==='SUPERLCM_PI_CAPTURE_INVALID'&&capture&&capture!==selectedCapture)prepare(ctx)
       }).finally(() => { current.promise = null })
     } catch (error) { stop(); notice(ctx, error.message) }
   }
@@ -144,21 +184,23 @@ export function registerPiCompaction(pi, options, {
     status(ctx, 'SuperLCM：预留空间不足，暂停下一轮并等待后台摘要')
     const selectedEpoch = epoch
     try {
-      return await summaryAttempt(async signal => {
+      const run=async signal => {
         const waiting = state?.promise
         if (waiting) await abortable(waiting, signal)
         signal.throwIfAborted()
         let result = await ready(ctx, current, signal, extra)
         if (!result) {
-          // One total deadline includes the current job, one restage and lookup.
-          // Session cancellation must never restart work on the old context.
+          // A completed but insufficient draft may restage once. Native branch
+          // retries have no overall deadline; session cancellation still wins.
           signal.throwIfAborted()
           prepare(ctx, true)
           const next = state?.promise
           if (next && next !== waiting) { await abortable(next, signal); signal.throwIfAborted(); result = await ready(ctx, current, signal, extra) }
         }
         return result
-      }, sessionController.signal, guardTimeoutMs)
+      }
+      const signal=ctx.signal?AbortSignal.any([sessionController.signal,ctx.signal]):sessionController.signal
+      return policy().summaryMode==='main-fork'?await run(signal):await summaryAttempt(run,signal,guardTimeoutMs)
     } catch (error) { if (epoch === selectedEpoch) { if (state) failed(ctx); stop() }; throw error }
   }
   async function swapIdle(ctx, force = false) {
@@ -214,6 +256,7 @@ export function registerPiCompaction(pi, options, {
     } catch (error) { if (epoch !== selectedEpoch) return; notice(ctx, error.message); if (danger(ctx)) pause(ctx) }
   })
   for (const name of ['agent_settled', 'model_select', 'session_start']) pi.on(name, (_event, ctx) => {
+    if(_event?.aborted){if(protectionAbort){protectionAbort=false;return};stop();clearRetries();return}
     prepare(ctx); if (state?.ready) void swapIdle(ctx)
   })
   pi.on('input', async (event, ctx) => {
@@ -268,13 +311,16 @@ export function registerPiCompaction(pi, options, {
       const p = policy()
       if (!p.enabled && !p.summaryEnabled) return
       if (p.enabled) {
-        const c = capacity(ctx), reserve = piOutputReserve(event.payload, ctx.model)
-        const limit = c && Math.min(c.inputLimit, ctx.model.contextWindow - reserve - Math.max(1024, ctx.model.contextWindow * .02))
-        if (!c || estimatePiRequest(event.payload) >= limit) { pause(ctx); return }
+        const c = capacity(ctx),payload=limitPiOutput(event.payload,ctx.model,piCompletionBudget(ctx.model,p.ratio,piOutputReserve(event.payload,ctx.model)))
+        const limit = c && Math.min(c.inputLimit, ctx.model.contextWindow - piOutputReserve(payload,ctx.model) - piWindowSafety(ctx.model,p.ratio))
+        if (!c || estimatePiRequest(payload) >= limit) { pause(ctx); return }
+        event={...event,payload}
       }
-      if (p.summaryMode !== 'main-fork') return
-      capture = { payload: structuredClone(event.payload), messages: requestMessages, model: structuredClone(ctx.model), reasoning: pi.getThinkingLevel?.() }
-      prepare(ctx)
+      if (p.summaryMode === 'main-fork'){
+        capture = { payload: structuredClone(event.payload), messages: requestMessages, model: structuredClone(ctx.model), reasoning: pi.getThinkingLevel?.() }
+        prepare(ctx)
+      }
+      return event.payload
     } catch (error) { notice(ctx, error.message); pause(ctx) }
   })
   pi.on('session_shutdown', () => reset())
@@ -285,4 +331,15 @@ export function registerPiCompaction(pi, options, {
     ctx.ui?.notify?.(`SuperLCM：${p.enabled ? '开启' : '关闭'}。提前后台准备${p.summaryMode === 'main-fork' ? '主模型分支' : 'Luna'}摘要，到 ${Math.round(p.ratio * 100)}% 直接替换。当前${state?.ready ? '已准备' : state ? '准备中' : '等待准备'}。`, 'info')
   } })
   return { prepare, ready, getState: () => state }
+}
+
+function retryDelay(ms,signal){
+  signal.throwIfAborted()
+  return new Promise((resolve,reject)=>{
+    const finish=(fn,value)=>{clearTimeout(timer);signal.removeEventListener('abort',cancel);fn(value)}
+    const cancel=()=>finish(reject,signal.reason)
+    const timer=setTimeout(()=>finish(resolve),ms);timer.unref?.()
+    signal.addEventListener('abort',cancel,{once:true})
+    if(signal.aborted)cancel()
+  })
 }

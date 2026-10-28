@@ -7,7 +7,7 @@ import {summaryToolPairing} from './summary-source.js'
 import { estimateSummaryTokens } from './summary-tokens.js'
 import { serializePiMessages } from './pi-snapshot.js'
 import { summaryAttempt } from './summary-attempt.js'
-import { estimatePiRequest, piOutputReserve } from './pi-request.js'
+import { estimatePiRequest, piOutputReserve,limitPiOutput } from './pi-request.js'
 let converter
 async function convert(messages) {
   if (!converter) {
@@ -46,8 +46,11 @@ export async function piForkPlan(snapshot, capture) {
   if(first!==selected.length)throw Error('Pi 选区存在未闭合工具组，保留原文')
   return plan
 }
-export async function summarizePiFork(ctx, snapshot, capture, { signal, stage, timeoutMs = 180000 } = {}) {
-  if (!capture?.payload || capture.model.provider !== ctx.model?.provider || capture.model.id !== ctx.model?.id) throw Error('Pi 尚未捕获当前模型的原始请求')
+export async function summarizePiFork(ctx,snapshot,capture,{signal,stage,timeoutMs=600000}={}) {
+  return summaryAttempt(abort=>runPiFork(ctx,snapshot,capture,{signal:abort,stage,timeoutMs}),signal,timeoutMs)
+}
+async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = {}) {
+  if (!capture?.payload || capture.model.provider !== ctx.model?.provider || capture.model.id !== ctx.model?.id) throw Object.assign(Error('Pi 尚未捕获当前模型的原始请求'),{code:'SUPERLCM_PI_CAPTURE_INVALID'})
   let model=capture.model
   if(snapshot.summaryModel){
     const separator=snapshot.summaryModel.indexOf('/')
@@ -55,7 +58,7 @@ export async function summarizePiFork(ctx, snapshot, capture, { signal, stage, t
     if(separator<1||!model)throw Error('所选 Pi 摘要模型不可用，请重新选择')
   }
   const override=model.provider!==capture.model.provider||model.id!==capture.model.id
-  const plan = await piForkPlan(snapshot, capture)
+  const plan = await piForkPlan(snapshot, capture).catch(error=>{error.code='SUPERLCM_PI_CAPTURE_INVALID';throw error})
   await stage() // Exact originals must be durably archived before model work.
   signal?.throwIfAborted()
   const target = Math.min(20000, Math.max(2048, snapshot.tokensBefore * .15))
@@ -64,7 +67,7 @@ export async function summarizePiFork(ctx, snapshot, capture, { signal, stage, t
   const directive = forkDirective(plan, treeOptions.targetTokens,undefined,treeOptions)
   let images = 0
   const encoded = JSON.stringify(capture.messages, (_key,value) => { if(value?.type === 'image'){images++;return {type:'image'}};return value })
-  const limit = model.contextWindow - nativeReserve - Math.max(1024,model.contextWindow*.02)
+  const limit = model.contextWindow - 1024 - Math.max(1024,model.contextWindow*.02)
   if (Number.isFinite(limit) && Math.max(snapshot.tokensBefore,estimateSummaryTokens(encoded)+images*8192) + estimateSummaryTokens(directive) >= limit) throw Error('Pi 后台分支没有足够输入空间，原文保留')
   const field = Array.isArray(capture.payload.messages) ? 'messages' : Array.isArray(capture.payload.input) ? 'input' : null
   if (!field) throw Error('当前 Pi 供应商没有可原样分支的请求数组')
@@ -78,7 +81,10 @@ export async function summarizePiFork(ctx, snapshot, capture, { signal, stage, t
       sent = true
       // Replay all native settings, tools, cache controls and original wire
       // messages. Only append the provider-converted final user instruction.
-      const replay = override ? payload : { ...structuredClone(capture.payload), [field]: [...structuredClone(capture.payload[field]), payload[field].at(-1)] }
+      let replay = override ? payload : { ...structuredClone(capture.payload), [field]: [...structuredClone(capture.payload[field]), payload[field].at(-1)] }
+      const available=model.contextWindow-Math.max(snapshot.tokensBefore,estimatePiRequest(replay))-Math.max(1024,model.contextWindow*.02)-1
+      if(available<1)throw Error('Pi 后台分支最终请求没有足够输入空间，原文保留')
+      replay=limitPiOutput(replay,model,available)
       const finalLimit=model.contextWindow-piOutputReserve(replay,model)-Math.max(1024,model.contextWindow*.02)
       if(!Number.isFinite(finalLimit)||finalLimit<=0)throw Error('Pi 摘要模型缺少有效输入容量，原文保留')
       wirePrefix=replay[targetField].slice(0,-1);wireSettings=Object.fromEntries(Object.entries(replay).filter(([key])=>key!==targetField))
