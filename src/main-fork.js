@@ -6,6 +6,8 @@ import {summarySettingsRevision} from './summarize.js'
 import {forkHash,forkAnchors,forkTreePlan,forkDirective,parseForkTree} from './fork-summary.js'
 import {summarizeNativeFork} from './native-fork.js'
 import {bindSummaryRun,finishSummaryRun,progressSummaryRun,summaryRunOwns} from './summary-runs.js'
+import {summaryAttempt} from './summary-attempt.js'
+import {classifySummaryError,summaryErrorDetail} from './summary-errors.js'
 
 export function nativeContextUsage(store,session,provided={}){
   if(provided.tokens>0&&provided.window>0)return provided
@@ -83,7 +85,16 @@ export function saveForkTree(store,session,plan,tree,{model,usage={},branchId=nu
     store.db.exec('COMMIT');return ids
   }catch(error){store.db.exec('ROLLBACK');throw error}
 }
-export async function generateMainFork(store,session,{runId,signal,shouldContinue=()=>true,env=process.env,summarize=summarizeNativeFork,force=true,queuedPlan=null,explicit=false}={}){
+function waitForRetry(ms,signal){
+  signal.throwIfAborted()
+  return new Promise((resolve,reject)=>{
+    const finish=(fn,value)=>{clearTimeout(timer);signal.removeEventListener('abort',cancel);fn(value)}
+    const cancel=()=>finish(reject,signal.reason)
+    const timer=setTimeout(()=>finish(resolve),ms)
+    signal.addEventListener('abort',cancel,{once:true});if(signal.aborted)cancel()
+  })
+}
+export async function generateMainFork(store,session,{runId,signal,shouldContinue=()=>true,env=process.env,summarize=summarizeNativeFork,force=true,queuedPlan=null,explicit=false,retry=false}={}){
   const meta=store.metadata(session)
   if(!['claude-code','codex'].includes(meta.harness))throw Error('此工具的分支由运行中的宿主准备')
   const plan=queuedPlan||planMainFork(store,session,{force,env}),owner='fork:'+randomUUID()
@@ -91,17 +102,48 @@ export async function generateMainFork(store,session,{runId,signal,shouldContinu
   if(runId&&!bindSummaryRun(store,runId,{owner,pid:process.pid}))return {session,busy:true}
   if(!store.lease(session,240000,owner)){if(runId)finishSummaryRun(store,runId,{owner,state:'stopped',reason:'busy'});return {session,busy:true}}
   const controller=new AbortController(),combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal
-  const valid=()=>shouldContinue()&&(explicit||store.integrationEnabled(meta.harness))&&(explicit||store.effectiveSetting(session,env).mode==='main-fork')&&summarySettingsRevision(store,session,env)===plan.revision&&(!runId||summaryRunOwns(store,runId,owner))
-  const timer=setInterval(()=>{if(!valid()||!store.renewLease(session,240000,owner))controller.abort(Error('后台分支摘要已取消'));else if(runId)progressSummaryRun(store,runId,owner)},10000);timer.unref()
-  try{
-    if(!valid())throw Error('后台分支配置已变化')
-    for(const row of plan.originals){store.exact(session,row.ordinal);if(store.db.prepare('SELECT digest FROM events WHERE session=? AND ordinal=?').get(session,row.ordinal)?.digest!==row.digest)throw Error('后台分支原文已变化')}
-    const result=await summarize(meta.harness,meta.conversation_id,forkDirective(plan.leaves,plan.targetTokens,plan.language.name,{fanout:plan.fanout}),{env,signal:combined,...(store.harnessSetting(meta.harness)?.mode==='main-fork'&&store.harnessSetting(meta.harness)?.model?{model:store.harnessSetting(meta.harness).model}:{})})
+  const valid=()=>shouldContinue()&&!!store.source(session)&&!store.isDeleted(session)&&(explicit||store.integrationEnabled(meta.harness))&&(explicit||store.effectiveSetting(session,env).mode==='main-fork')&&summarySettingsRevision(store,session,env)===plan.revision&&(!runId||summaryRunOwns(store,runId,owner))
+  const timer=setInterval(()=>{
+    try{if(!valid()||!store.renewLease(session,240000,owner))controller.abort(Error('后台分支摘要已取消'));else if(runId)progressSummaryRun(store,runId,owner)}
+    catch{controller.abort(Error('后台分支无法核验任务归属，原文保留'))}
+  },10000);timer.unref()
+  const assertCurrent=()=>{
     combined.throwIfAborted()
-    const tree=parseForkTree(result.text,plan.leaves,plan.language,{fanout:plan.fanout,targetTokens:plan.targetTokens})
-    const ids=saveForkTree(store,session,plan,tree,{...result,owner,validate:valid})
-    store.completeSummaryBatch(session,plan.digest,plan.revision);store.setStatus(session,'ok');if(runId){progressSummaryRun(store,runId,owner,{created:ids.length});finishSummaryRun(store,runId,{owner,state:'done'})}
-    return {session,created:ids.length,calls:1,branch:result.branchId}
-  }catch(error){if(!combined.aborted)store.failSummaryBatch(session,plan.digest,plan.revision);store.setStatus(session,'summary_failed');if(runId)finishSummaryRun(store,runId,{owner,state:combined.aborted?'stopped':'failed',error});throw error}
+    try{
+      if(!valid()||!store.ownsLease(session,owner))throw Error('后台分支配置或任务归属已变化')
+      for(const row of plan.originals){store.exact(session,row.ordinal);if(store.db.prepare('SELECT digest FROM events WHERE session=? AND ordinal=?').get(session,row.ordinal)?.digest!==row.digest)throw Error('后台分支原文已变化')}
+    }catch(error){controller.abort(error);throw error}
+  }
+  let completed,calls=0,retryNote=''
+  try{
+    for(let attempt=1;;attempt++){
+      assertCurrent()
+      if(runId&&attempt>1)store.db.prepare("UPDATE summary_runs SET error_message=? WHERE id=? AND owner=? AND state='running'").run(`正在进行第 ${attempt} 次后台摘要尝试，原文保留。`,runId,owner)
+      try{
+        if(!completed){
+          calls++
+          const result=await summaryAttempt(abort=>summarize(meta.harness,meta.conversation_id,forkDirective(plan.leaves,plan.targetTokens,plan.language.name,{fanout:plan.fanout})+retryNote,{env,signal:abort,timeoutMs:600000,...(store.harnessSetting(meta.harness)?.mode==='main-fork'&&store.harnessSetting(meta.harness)?.model?{model:store.harnessSetting(meta.harness).model}:{})}),combined,600000)
+          assertCurrent()
+          // Native completion and the transport limit bound generation. The
+          // estimate guides writing; planCompaction separately checks whether
+          // the archived tree can safely replace the foreground context.
+          const tree=parseForkTree(result.text,plan.leaves,plan.language,{fanout:plan.fanout})
+          completed={result,tree}
+        }
+        assertCurrent()
+        const ids=saveForkTree(store,session,plan,completed.tree,{...completed.result,owner,validate:valid})
+        store.completeSummaryBatch(session,plan.digest,plan.revision);store.setStatus(session,'ok');if(runId){progressSummaryRun(store,runId,owner,{created:ids.length});finishSummaryRun(store,runId,{owner,state:'done'})}
+        return {session,created:ids.length,calls,branch:completed.result.branchId}
+      }catch(error){
+        assertCurrent()
+        if(!error.summaryKind&&(error instanceof SyntaxError||/分块|层级|分支摘要/.test(error.message)))error.summaryKind='response_invalid'
+        if(!retry||classifySummaryError(error)==='spawn')throw error
+        if(['response_invalid','quality'].includes(classifySummaryError(error)))retryNote='\nThe previous response failed summary validation. Return only the required JSON object, with every planned leaf and parent exactly once in index order. Start each summary with a heading in the requested language. Do not call tools or continue the task.'
+        const delay=Math.min(300000,30000*2**Math.min(attempt-1,4)),safe=summaryErrorDetail(error)
+        if(runId)store.db.prepare("UPDATE summary_runs SET heartbeat_ms=?,error_kind=?,error_message=? WHERE id=? AND owner=? AND state='running'").run(Date.now(),safe.kind,`后台分支摘要第 ${attempt} 次未完成。将在 ${delay/1000} 秒后自动重试，原文已保留。`,runId,owner)
+        await waitForRetry(delay,combined)
+      }
+    }
+  }catch(error){if(!combined.aborted&&store.ownsLease(session,owner)){store.failSummaryBatch(session,plan.digest,plan.revision);store.setStatus(session,'summary_failed')}if(runId)finishSummaryRun(store,runId,{owner,state:combined.aborted?'stopped':'failed',error});throw error}
   finally{clearInterval(timer);store.release(session,owner)}
 }

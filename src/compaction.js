@@ -118,13 +118,14 @@ export function renderPacket({ meta, summaries, through, keep, instructions, rec
     `The complete original of the earlier portion is preserved: summaries are navigation, not proof, so before relying on a detail call lcm_read {"conversation":"#${code}","from":<first>,"to":<last>} with a summary's record range (or lcm_find / lcm_outline) and quote the original.\n` +
     RECALL_POLICY+'\n'+
     (instructions ? `The person asked this compaction to keep in mind: ${instructions.slice(0, 2000)}\n` : '')
-  let body = '', omitted = 0
+  let body = ''
   for (const n of summaries) {
     const block = `<summary id="${escapeAttr(n.id)}" level="${n.level}" records="${n.first}-${n.last}">\n${String(n.summary).trim()}\n</summary>\n`
-    if (head.length + body.length + block.length > MAX_PACKET_CHARS) { omitted++; continue }
+    // Every covered source range needs its summary in the replacement. A
+    // navigation notice cannot stand in for an omitted continuation summary.
+    if (head.length + body.length + block.length > MAX_PACKET_CHARS) return null
     body += block
   }
-  if (omitted) body += `(${omitted} more summaries did not fit; lcm_outline {"conversation":"#${code}"} lists them.)\n`
   if (recent) body += `<recent records="${recent.first}-${recent.last}">\nNot summarized yet: the dialogue of records ${recent.first}-${recent.last} word for word, tool calls and their output left out (lcm_read has them).\n${recent.text}\n</recent>\n`
   if(request)body+=`<current-request record="${request.ordinal}" historical="true">\nPreserved original user request; newer explicit instructions in the kept messages govern its scope.\n${request.text}\n</current-request>\n`
   const packet=head + body + `</${PACKET_TAG}>`

@@ -23,7 +23,7 @@ export function enqueueSummary(store,session,{backend=null,mode,model,origin='ma
   const fork=mode==='main-fork'?planMainFork(store,session,{force:['manual','bulk'].includes(origin),env}):null
   const work=mode==='main-fork'?(fork?{batch_id:fork.digest}:null):summaryWork(store,session)
   if(!work)return {added:false,none:true}
-  if(!['manual','bulk'].includes(origin)&&store.summaryRetry(session,work.batch_id,summarySettingsRevision(store,session,env)))return {added:false,cooldown:true}
+  if(mode!=='main-fork'&&!['manual','bulk'].includes(origin)&&store.summaryRetry(session,work.batch_id,summarySettingsRevision(store,session,env)))return {added:false,cooldown:true}
   store.db.exec('BEGIN IMMEDIATE')
   try {
     const active=activeSummaryRun(store,session)

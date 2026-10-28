@@ -85,14 +85,167 @@ import {join} from 'node:path'
 import {ClaudeStore} from '../src/store.js'
 import {planMainFork,generateMainFork} from '../src/main-fork.js'
 import {enqueueSummary,scheduleSummary} from '../src/summary-scheduler.js'
-function archive(t,{count=4,size=100}={}){
+import {estimateSummaryTokens} from '../src/summary-tokens.js'
+import {runSummaryWorker} from '../src/summary-worker.js'
+import {planCompaction} from '../src/compaction.js'
+
+const until=async predicate=>{const start=Date.now();while(!predicate()){if(Date.now()-start>5000)throw Error('Native fork fixture did not settle');await new Promise(setImmediate)}}
+function archive(t,{count=4,size=100,harness='claude-code'}={}){
  const dir=mkdtempSync(join(tmpdir(),'superlcm-native-fork-')),store=new ClaudeStore(join(dir,'index')),file=join(dir,'history.jsonl')
  const row=i=>JSON.stringify({type:i%2?'assistant':'user',uuid:'entry-'+i,message:{content:[{type:'text',text:'Original evidence '+i+' '+'.'.repeat(size)}]}})+'\n'
  writeFileSync(file,Array.from({length:count},(_,i)=>row(i)).join(''));store.ingest('session',file)
- store.setMetadata('session',{harness:'claude-code',externalId:'native-source'});store.setGlobalSetting('main-fork')
+ store.setMetadata('session',{harness,externalId:'native-source'});store.setGlobalSetting('main-fork')
  t.after(()=>{store.close();rmSync(dir,{recursive:true,force:true})});return {store,file,row}
 }
 const treeAnswer=plan=>JSON.stringify({blocks:plan.tree.map(n=>({index:n.index,summary:'# Historical evidence\nThe user constraints remain active. Inspection is pending; verify original records.'}))})
+
+for(const harness of ['claude-code','codex'])test(harness+' archives a complete tree above its planning estimate without regenerating',async t=>{
+ const {store}=archive(t,{harness})
+ const plan=planMainFork(store,'session',{force:true,env:{}})
+ const summary='# Historical evidence\n'+'Preserve the original user constraints and pending work. '.repeat(180)
+ assert.ok(estimateSummaryTokens(summary)>plan.targetTokens)
+ let calls=0
+ const result=await generateMainFork(store,'session',{env:{},queuedPlan:plan,summarize:async()=>{calls++;return {text:JSON.stringify({blocks:plan.tree.map(n=>({index:n.index,summary}))}),model:'current-model'}}})
+ assert.equal(calls,1);assert.equal(result.created,plan.tree.length)
+ assert.equal(store.nodeRows('session',0)[0].summary,summary.trim())
+})
+
+for(const kind of ['bytes','tokens'])test('an archived root beyond the replacement '+kind+' limit cannot be injected into the live context',()=>{
+ const events=[{ordinal:0,preview:'user: old request'},{ordinal:1,preview:'assistant: old answer'},{ordinal:2,preview:'user: current request'}]
+ const messages=events.map(e=>({role:e.preview.split(': ')[0],text:e.preview.split(': ')[1],size:1000}))
+ const nodes=[{id:'root',level:0,first:0,last:1,summary:'# Historical state\n'+(kind==='bytes'?'x'.repeat(300000):'中'.repeat(50000))}]
+ const plan=planCompaction({meta:{code:'fixture'},events,nodes,messages,tokens:80000,window:100000,keepTokens:0})
+ assert.equal(plan.use,false);assert.match(plan.reason,/safe size|too large/)
+})
+
+test('all mandatory summary roots must fit before their covered messages can be removed',()=>{
+ const texts=['user: first request','assistant: first answer','user: second request','assistant: second answer','user: current request']
+ const events=texts.map((preview,ordinal)=>({preview,ordinal})),messages=texts.map(t=>({role:t.split(': ')[0],text:t.split(': ')[1],size:1000}))
+ const nodes=[{id:'first',level:0,first:0,last:1,summary:'# Preserved first range'}, {id:'second',level:0,first:2,last:3,summary:'# Essential second range\n'+'x'.repeat(300000)}]
+ assert.equal(planCompaction({meta:{code:'fixture'},events,nodes,messages,tokens:80000,window:100000,keepTokens:0}).use,false)
+})
+
+test('old three-failure cooldown does not permanently suppress native background branches',t=>{
+ const {store}=archive(t,{count:24,size:16000}),plan=planMainFork(store,'session',{force:false,env:{}})
+ for(let i=0;i<3;i++)store.failSummaryBatch('session',plan.digest,plan.revision)
+ assert.equal(enqueueSummary(store,'session',{origin:'hook',env:{}}).added,true)
+})
+
+test('Claude accepts its final completion receipt without waiting for child shutdown',async()=>{
+ const result=await summarizeClaudeFork('source','summary',{env,timeoutMs:20,spawnProcess:fake(child=>child.stdin.on('finish',()=>{
+  emit(child,{type:'result',subtype:'success',result:'# Historical state\nPreserve original constraints.',stop_reason:'end_turn'})
+ }))})
+ assert.match(result.text,/Historical state/)
+})
+
+test('native transport still rejects responses above its independent byte limit',async()=>{
+ await assert.rejects(summarizeClaudeFork('source','summary',{env,spawnProcess:fake(child=>child.stdin.on('finish',()=>child.stdout.write('x'.repeat(8*1024*1024+1))))}),error=>error.summaryKind==='length')
+})
+
+test('native branch default allows ten minutes per attempt',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']})
+ let settled=false
+ const job=summarizeClaudeFork('source','summary',{env,spawnProcess:fake(()=>{})})
+ job.then(()=>{settled=true},()=>{settled=true})
+ try{
+  t.mock.timers.tick(180001);await new Promise(setImmediate)
+  assert.equal(settled,false,'the old three-minute deadline must not discard a large branch')
+  t.mock.timers.tick(600000)
+  await assert.rejects(job,error=>error.summaryKind==='timeout')
+ }finally{t.mock.timers.reset()}
+})
+
+test('native background worker retries beyond three failures without another foreground turn',async t=>{
+ const {store,file,row}=archive(t),counter=join(file,'..','attempt-count.json'),bin=join(file,'..','fake-claude.mjs')
+ writeFileSync(bin,`#!${process.execPath}\nimport {readFileSync,writeFileSync} from 'node:fs'\nconst file=${JSON.stringify(counter)};let n=0;try{n=JSON.parse(readFileSync(file))}catch{}\nwriteFileSync(file,JSON.stringify(++n));let prompt='';for await(const part of process.stdin)prompt+=part;writeFileSync(file+'.prompt-'+n,prompt)\nconst plan=JSON.parse(prompt.split('\\n').find(s=>s.startsWith('[{"index":')))\nconst text=JSON.stringify({blocks:plan.map(p=>({index:p.index,summary:'# Historical evidence\\nOriginal user constraints and pending work remain active.'}))})\nconsole.log(JSON.stringify(n===1?{type:'result',is_error:true,result:'rate_limit_error secret-credential'}:n===2?{type:'result',subtype:'success',result:'{\"blocks\":[]}',stop_reason:'end_turn'}:n===3?{type:'result',subtype:'success',result:'{broken',stop_reason:'end_turn'}:{type:'result',subtype:'success',result:text,stop_reason:n===4?'max_tokens':'end_turn'}))\n`,{mode:0o700})
+ t.mock.timers.enable({apis:['setTimeout','setInterval']})
+ const scoped={...env,SUPERLCM_CLAUDE_CLI_BIN:bin}
+ let error,finished=false
+ const job=runSummaryWorker(store,'session',{env:scoped})
+ job.then(()=>{finished=true},e=>{error=e;finished=true})
+ try{
+  for(let i=1;i<=4;i++){
+   await until(()=>finished||store.latestSummaryRun('session')?.error_message?.includes('第 '+i+' 次未完成'))
+   assert.equal(error,undefined,'a failed attempt must not terminate the background worker')
+   assert.equal(finished,false)
+   const run=store.latestSummaryRun('session')
+   assert.equal(run.state,'running');assert.ok(!run.error_message.includes('secret-credential'))
+   assert.equal(run.error_kind,['rate_limit','response_invalid','response_invalid','stream_cutoff'][i-1])
+   assert.equal(store.nodeRows('session',0).length,0)
+   if(i===2){appendFileSync(file,row(4));store.ingest('session',file)}
+   t.mock.timers.tick(30000*2**(i-1))
+  }
+  const result=await job
+  const {readFileSync}=await import('node:fs')
+  assert.equal(result.calls,5);assert.equal(JSON.parse(readFileSync(counter)),5)
+  const first=readFileSync(counter+'.prompt-1','utf8'),last=readFileSync(counter+'.prompt-5','utf8')
+  assert.equal(last.slice(0,first.length),first,'retries retain the original plan and only append correction instructions')
+  assert.match(last,/previous response failed summary validation/)
+  assert.equal(store.latestSummaryRun('session').state,'done')
+  assert.equal(store.nodeRows('session',0).length,1)
+  assert.ok(store.nodeRows('session',0).every(n=>n.last<4))
+ }finally{
+  store.setGlobalSetting('off');t.mock.timers.tick(10000)
+  await job.catch(()=>{});t.mock.timers.reset()
+ }
+})
+
+test('an attempt timeout does not end the job and a late response cannot publish',async t=>{
+ const {store}=archive(t),plan=planMainFork(store,'session',{force:true,env:{}})
+ let calls=0,release
+ const gate=new Promise(resolve=>release=resolve)
+ t.mock.timers.enable({apis:['setTimeout','setInterval']})
+ const controller=new AbortController(),job=generateMainFork(store,'session',{env:{},signal:controller.signal,retry:true,queuedPlan:plan,summarize:async()=>{calls++;return calls===1?gate:{text:treeAnswer(plan),model:'current'}}})
+ job.catch(()=>{})
+ try{
+  await until(()=>calls===1)
+  t.mock.timers.tick(600001);await new Promise(setImmediate)
+  release({text:treeAnswer(plan),model:'obsolete'});await new Promise(setImmediate)
+  assert.equal(store.nodeRows('session',0).length,0)
+  t.mock.timers.tick(30000)
+  const result=await job
+  assert.equal(result.calls,2);assert.equal(calls,2)
+  assert.equal(store.nodeRows('session',0)[0].model,'current')
+ }finally{controller.abort();await job.catch(()=>{});t.mock.timers.reset()}
+})
+
+test('retrying publication reuses the completed native summary without another model call',async t=>{
+ const {store}=archive(t),plan=planMainFork(store,'session',{force:true,env:{}}),controller=new AbortController()
+ let calls=0,failed=false
+ const prepare=store.db.prepare.bind(store.db)
+ store.db.prepare=(sql,...args)=>{
+  if(!failed&&sql==='INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)'){failed=true;throw Error('temporary SQLite write failure')}
+  return prepare(sql,...args)
+ }
+ t.mock.timers.enable({apis:['setTimeout','setInterval']})
+ const job=generateMainFork(store,'session',{env:{},retry:true,queuedPlan:plan,signal:controller.signal,summarize:async()=>{calls++;return {text:treeAnswer(plan),model:'current'}}})
+ job.catch(()=>{})
+ try{
+  await until(()=>failed);await new Promise(setImmediate)
+  assert.equal(store.nodeRows('session',0).length,0)
+  t.mock.timers.tick(30000)
+  const result=await job
+  assert.equal(calls,1);assert.equal(result.calls,1);assert.equal(result.created,plan.tree.length)
+ }finally{controller.abort();await job.catch(()=>{});t.mock.timers.reset()}
+})
+
+for(const change of ['settings','source','lease','cancel'])test('retry stops when '+change+' invalidates the frozen native branch',async t=>{
+ const {store}=archive(t),plan=planMainFork(store,'session',{force:true,env:{}}),controller=new AbortController()
+ let calls=0
+ t.mock.timers.enable({apis:['setTimeout','setInterval']})
+ const job=generateMainFork(store,'session',{env:{},retry:true,queuedPlan:plan,signal:controller.signal,summarize:async()=>{calls++;throw Error('temporary provider failure')}})
+ job.catch(()=>{})
+ try{
+  await until(()=>calls===1);await new Promise(setImmediate)
+  if(change==='settings')store.setGlobalSetting('off')
+  if(change==='source')store.db.prepare('UPDATE events SET digest=? WHERE session=? AND ordinal=?').run('changed','session',plan.originals[0].ordinal)
+  if(change==='lease')store.db.prepare('UPDATE leases SET owner=? WHERE session=?').run('new-owner','session')
+  if(change==='cancel')controller.abort(Error('cancelled'))
+  t.mock.timers.tick(30000)
+  await assert.rejects(job)
+  assert.equal(calls,1);assert.equal(store.nodeRows('session',0).length,0)
+ }finally{controller.abort();await job.catch(()=>{});t.mock.timers.reset()}
+})
 test('queued fork freezes source, saves all levels atomically, and keeps appended originals',async t=>{
  const {store,file,row}=archive(t),queued=enqueueSummary(store,'session',{env:{}})
  const plan=JSON.parse(store.db.prepare('SELECT plan FROM fork_summary_plans WHERE run_id=?').get(queued.run.id).plan)
