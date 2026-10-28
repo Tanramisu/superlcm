@@ -124,7 +124,9 @@ export function registerPiCompaction(pi, options, {
       state = current; status(ctx, p.summaryMode === 'main-fork' ? 'SuperLCM：主模型后台分支摘要' : 'SuperLCM：Luna 后台准备摘要')
       const work = async (signal,progress) => {
         if (p.summaryMode !== 'main-fork') return request({ ...options, command: 'pi-prepare' }, snapshot, signal)
-        const restored = current.ignorePrepared?null:await request({ ...options, command: 'pi-ready' }, {session_id:snapshot.session_id,draftKey:snapshot.draftKey}, signal)
+        let restored=null
+        if(!current.ignorePrepared)try{restored=await request({ ...options, command: 'pi-ready' }, {session_id:snapshot.session_id,draftKey:snapshot.draftKey}, signal)}
+        catch(error){if(signal.aborted||!(error instanceof SyntaxError))throw error;current.ignorePrepared=true}
         if (restored?.compaction) return restored
         if(!selectedCapture)selectedCapture=capture
         if(!selectedCapture||['id','provider','contextWindow','maxTokens','api','baseUrl'].some(key=>selectedCapture.model?.[key]!==ctx.model?.[key])||selectedCapture.reasoning!==settings().thinkingLevel)throw Object.assign(Error('Pi 等待捕获当前模型请求后恢复后台摘要'),{code:'SUPERLCM_PI_CAPTURE_INVALID'})

@@ -1,5 +1,8 @@
 import {randomUUID} from 'node:crypto'
 import {summaryEvents} from './summary-source.js'
+import {claudeCompactionNodes} from './claude-checkpoints.js'
+import {coveredThrough} from './compaction.js'
+import {coversSummaryRange} from './summary-merge.js'
 import {detectSummaryLanguage,userTextFromRecord} from './summary-language.js'
 import {estimateSummaryTokens} from './summary-tokens.js'
 import {summarySettingsRevision} from './summarize.js'
@@ -35,7 +38,11 @@ function anchor(raw){
   }catch{return {firstAnchor:'',lastAnchor:''}}
 }
 export function planMainFork(store,session,{keepTokens=40000,force=false,env=process.env}={}){
-  const done=store.nodeRows(session,0),start=done.length?Math.max(...done.map(n=>n.last))+1:0
+  const done=store.nodeRows(session,0),claude=store.metadata(session).harness==='claude-code'
+  const start=claude?coveredThrough(claudeCompactionNodes(store,session))+1:done.length?Math.max(...done.map(n=>n.last))+1:0
+  // A native fork cannot see source text before its own last compaction. Do
+  // not repeatedly ask it to certify an old gap that it cannot reconstruct.
+  if(claude&&store.lastCompaction(session)>start)return null
   const all=summaryEvents(store,session,start),tuning=store.tuning()
   if(!all.length)return null
   const sizes=all.map(e=>estimateSummaryTokens(e.summaryText)),total=sizes.reduce((a,b)=>a+b,0)
@@ -47,6 +54,19 @@ export function planMainFork(store,session,{keepTokens=40000,force=false,env=pro
     for(const id of p.opened)pending.add(id)
     for(const id of p.closed)pending.delete(id)
     if(!pending.size&&(remaining>=keepTokens||force&&total<=keepTokens))cut=i
+  }
+  if(claude&&cut>=0){
+    const opaque=all.findIndex((e,i)=>i<=cut&&hasUnrepresentedContent(store.exact(session,e.ordinal)))
+    if(opaque>=0){
+      // Keep the longest closed tool group before an opaque record. The next
+      // pass stops at that record instead of repeatedly generating unusable trees.
+      cut=-1;pending=new Set()
+      for(let i=0;i<opaque;i++){
+        const p=all[i].toolPairing;if(p.endsTurn)pending.clear()
+        for(const id of p.opened)pending.add(id);for(const id of p.closed)pending.delete(id)
+        if(!pending.size)cut=i
+      }
+    }
   }
   if(cut<0)return null
   const selected=all.slice(0,cut+1),leaves=[]
@@ -70,6 +90,7 @@ export function planMainFork(store,session,{keepTokens=40000,force=false,env=pro
 export function saveForkTree(store,session,plan,tree,{model,usage={},branchId=null,owner,validate=()=>true}={}){
   store.db.exec('BEGIN IMMEDIATE')
   try{
+    if(!store.source(session)||store.isDeleted(session))throw Error('Conversation was deleted; summary not saved')
     if(!validate()||owner&&!store.ownsLease(session,owner))throw Error('摘要配置或任务归属已变化，结果未保存')
     const claude=store.metadata(session).harness==='claude-code',unrepresented=[]
     // A resumed Claude branch may only see its native checkpoint after the
@@ -84,14 +105,21 @@ export function saveForkTree(store,session,plan,tree,{model,usage={},branchId=nu
         if(hasUnrepresentedContent(raw))unrepresented.push(row.ordinal)
       }
     }
-    const ids=tree.map(n=>n.archiveId||'s'+n.level+'-'+forkHash([session,plan.digest,n.index,n.summary]).slice(0,24))
+    const recorded=new Set(plan.originals.map(row=>row.ordinal))
+    if(claude)for(const node of tree){
+      if(!Number.isSafeInteger(node.firstMessage)||!Number.isSafeInteger(node.lastMessage)||node.firstMessage<0||node.lastMessage<node.firstMessage)throw Error('Summary source range is invalid')
+      for(let ordinal=node.firstMessage;ordinal<=node.lastMessage;ordinal++)if(!recorded.has(ordinal))throw Error('Summary source range is not fully verified')
+      const children=node.children.map(i=>tree[i])
+      if(node.level>0&&(children.some(child=>!child)||!coversSummaryRange(children.map(child=>({first:child.firstMessage,last:child.lastMessage})),node.firstMessage,node.lastMessage)))throw Error('Summary children do not cover the declared source range')
+    }
+    const ids=tree.map(n=>n.archiveId||'s'+n.level+'-'+forkHash([session,plan.digest,n.index,n.summary,...(claude?['claude-coverage-v3']:[])]).slice(0,24))
     for(const node of tree){
       const inserted=store.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(session,ids[node.index],node.semanticLevel??node.level,node.firstMessage,node.lastMessage,JSON.stringify(node.children.map(i=>ids[i])),node.summary,plan.digest,model)
       if(node.modelSummary){store.db.exec('CREATE TABLE IF NOT EXISTS fork_parent_variants(session TEXT,id TEXT,summary TEXT,PRIMARY KEY(session,id))');store.db.prepare('INSERT OR IGNORE INTO fork_parent_variants VALUES(?,?,?)').run(session,ids[node.index],node.modelSummary)}
       const complete=!claude||node.firstMessage>=uncertainBefore&&!unrepresented.some(ordinal=>ordinal>=node.firstMessage&&ordinal<=node.lastMessage)
       if(inserted.changes){
         store.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET complete=excluded.complete').run(session,ids[node.index],complete?1:0)
-        if(claude)store.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v2 VALUES(?,?)').run(session,ids[node.index])
+        if(claude)store.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v3 VALUES(?,?)').run(session,ids[node.index])
       }
       if(node.sourceRecords){
         store.db.exec('CREATE TABLE IF NOT EXISTS dsh_node_sources(session TEXT NOT NULL,id TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(session,id,seq))')

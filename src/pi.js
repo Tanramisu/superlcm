@@ -30,7 +30,8 @@ export function capturePi(store, { session_id: id, session_file: path }, { env =
   if (!inside(root, file)) throw new Error('Pi session file is outside the Pi sessions folder')
   const header = head(file)
   if (header?.type !== 'session' || header.id !== id) throw new Error('Pi session file does not belong to this session')
-  const result = store.ingest(session, file)
+  const result = store.ingest(session, file,'jsonl',{automatic})
+  if(result.skipped)return result
   const name = sessionName(file)
   store.setMetadata(session, { harness: 'pi', externalId: id, name: name || null, nameSource: name ? 'native' : 'derived' })
   return { ...result, session }

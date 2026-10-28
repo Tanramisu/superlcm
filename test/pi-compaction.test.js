@@ -45,6 +45,26 @@ test('completed Pi pieces are reused on retries but not after model settings cha
   f.store.setHarnessSetting('pi', 'api', null, null, null, m.id)
   await run(); assert.equal(calls, 2)
 })
+test('a corrupted Pi source-piece cache is invalidated and regenerated once',async t=>{
+  const f=fixture(t);let calls=0
+  const options={env:f.env,summarize:async()=>{calls++;return summary}}
+  await compactPi(f.store,f.input,options);assert.equal(calls,1)
+  f.store.db.prepare('UPDATE pi_compaction_chunks SET summary=?').run('broken summary without heading')
+  const repaired=await compactPi(f.store,f.input,options);assert.equal(calls,2);assert.equal(repaired.details.cached,0)
+  const again=await compactPi(f.store,f.input,options);assert.equal(calls,2);assert.equal(again.details.cached,1)
+})
+test('broken Pi prepared JSON is discarded without repurchasing valid chunks',async t=>{
+  const f=fixture(t);f.input.draftKey='7'.repeat(64);let calls=0
+  const options={env:f.env,summarize:async()=>{calls++;return summary}}
+  await preparePi(f.store,f.input,options);assert.equal(calls,1)
+  for(const column of ['snapshot','compaction']){
+   f.store.db.prepare(`UPDATE pi_prepared_compactions SET ${column}=?`).run('{broken-json')
+   assert.equal(readPreparedPi(f.store,f.input,{env:f.env}),null)
+   assert.equal(f.store.db.prepare('SELECT count(*) n FROM pi_prepared_compactions').get().n,0)
+   assert.ok((await preparePi(f.store,f.input,options)).compaction)
+  }
+  assert.equal(calls,1,'valid source pieces remain reusable')
+})
 test('a non-shrinking merge is regenerated on retry while successful source pieces are reused',async t=>{
   const f=fixture(t);let leaves=0,merges=0
   const input={...f.input,tokensBefore:1000,source:'Historical source record. '.repeat(2000)}
@@ -139,6 +159,19 @@ function captureRuntime(r,payload={messages:[{role:'user',content:'captured pref
  r.handlers.get('context_with_system')({messages:r.rows.flatMap(e=>e.messages)},r.ctx)
  return r.handlers.get('before_provider_request')({payload},r.ctx)
 }
+
+test('Pi bypasses a malformed ready response and prepares a fresh branch',async()=>{
+ let forks=0,prepared
+ const r=runtime({readPolicy:mainForkPolicy,
+  responder:async(opts,snap)=>opts.command==='pi-ready'?Promise.reject(new SyntaxError('corrupt stored JSON')):opts.command==='pi-stage'?{revision:'fixed'}:(prepared={compaction:{summary,firstKeptEntryId:snap.firstKeptEntryId}}),
+  fork:async(_ctx,_snap,_capture,{stage})=>{forks++;await stage();return {blocks:[],tree:[]}}})
+ try{
+  r.rows[0].messages[0].content='compressible history '.repeat(10000)
+  captureRuntime(r);await until(()=>r.api.getState()?.ready)
+  assert.equal(forks,1);assert.deepEqual(r.commands,['pi-ready','pi-stage','pi-prepare'])
+  assert.equal(r.api.getState().ready,prepared)
+ }finally{r.handlers.get('session_shutdown')()}
+})
 
 test('Pi 500K window prepares at 350K and only replaces at 400K with a 128K output reservation',async()=>{
  const r=runtime({tokens:340000,compactEffect:(ctx)=>{ctx.tokens=1000}})

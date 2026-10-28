@@ -136,7 +136,7 @@ export function prepareRescueSource(store,session,input) {
   const task={level,kind:'checkpoint',first:0,last:through,language,requireHeading:true,maxChars:60000,targetTokens:outputTokens}
   const prompt=buildSummaryPrompt(content,task),inputTokens=estimateSummaryTokens(SUMMARY_SYSTEM+prompt)
   if(inputTokens+outputTokens+2048>window||prompt.length>32e6)return null
-  const p={evidenceVersion:2,start,keep:messages.length-start,through,request,window,tokens,keptTokens:messages.slice(start).reduce((s,m)=>s+size(m),0)*tokens/total,
+  const p={evidenceVersion:3,start,keep:messages.length-start,through,request,window,tokens,keptTokens:messages.slice(start).reduce((s,m)=>s+size(m),0)*tokens/total,
     instructions:input.instructions||'',model:input.model,level,language,outputTokens,sourceHash:rescueSourceHash(store,session,through),
     children:prefix.map(n=>n.id),childHashes:prefix.map(n=>[n.id,rescueHash(n.summary)]),inputHash:rescueHash(messages),settingHash:rescueHash(setting),cancelId:input.cancel_id||null,surfaceHash:rescueSourceHash(store,session,Number.MAX_SAFE_INTEGER)}
   p.nodeId='claude-rescue-'+rescueHash([p.evidenceVersion,session,p.sourceHash,p.inputHash,p.settingHash,p.model,p.childHashes,p.instructions,p.window,p.keptTokens]).slice(0,40)

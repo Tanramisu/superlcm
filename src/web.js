@@ -21,7 +21,7 @@ import { ClaudeStore } from './store.js'
 import { continuePacket } from './context.js'
 import { modelCatalog, harnessConnections } from './model-catalog.js'
 import { summaryMode } from './mode.js'
-import { stageApiKey, bindApiKey, readApiKey, apiKeyEndpoint } from './api-credentials.js'
+import { stageApiKey, bindApiKey, readApiKey, apiKeyEndpoint, apiCredentialCleanupPending, retryApiCredentialCleanup } from './api-credentials.js'
 import { loopbackEndpoint } from './api-endpoint.js'
 import { findCli } from './runtime.js'
 import { summaryEstimate, summarizeWithModel } from './summarize.js'
@@ -135,7 +135,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'POST /api/delete': async req => { const x = await body(req); return store.deleteSession(x.session) },
     'POST /api/delete-preview': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); return { count: rows.length, records: rows.reduce((n, r) => n + r.records, 0), sample: rows.slice(0, 8).map(r => ({ name: r.name || r.session, harness: r.harness, updated_ms: r.updated_ms })) } },
     // The client confirms the exact count it previewed, so a conversation that became stale meanwhile is not removed unseen.
-    'POST /api/delete-bulk': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); if (rows.length !== x.expect_count) throw new Error('The matching conversations changed; preview again'); for (const r of rows) store.deleteSession(r.session); return { deleted: rows.length } },
+    'POST /api/delete-bulk': async req => { const x = await body(req); const rows = store.staleSessions(x.before_ms, x.harness || undefined).filter(row=>row.harness!=='hermes'); if (rows.length !== x.expect_count) throw new Error('The matching conversations changed; preview again'); let file_cleanup_pending=0;for (const r of rows) if(store.deleteSession(r.session).file_cleanup_pending)file_cleanup_pending++; return { deleted: rows.length, ...(file_cleanup_pending?{file_cleanup_pending}:{}) } },
     'GET /api/storage': () => store.storageStats(),
     'POST /api/connection-check': async req => { const x = await body(req); return x.harness === 'claude-code' ? claudeProbe(store, { env }) : testHarness(store, x.harness, { env }) },
     'POST /api/setup-preview': async req => { const x = await body(req); return publicPreview(await setupPreview(store, x.harness, { env,provider_ref:x.provider_ref,provider:x.provider,model:x.model })) },
@@ -146,6 +146,8 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'GET /api/models': url => catalog(url.searchParams.get('backend'), { env }),
     // Kept fast: no tool detection here, so saving a choice on a card answers at once.
     'GET /api/settings': async () => {
+      retryApiCredentialCleanup(store.db,store.dir)
+      let file_cleanup_pending;try{file_cleanup_pending=store.cleanupDeletedFiles()}catch{file_cleanup_pending=store.db.prepare('SELECT COUNT(DISTINCT session) n FROM deleted_session_files').get().n}
       const settings = store.harnessSettings().filter(x=>x.harness!=='hermes')
       let dshRatio=.8
       try{dshRatio=readControls(controlsPath(store))?.config.switchRatio??.8}catch{dshRatio=null}
@@ -155,6 +157,8 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
         index_home: store.dir,
         settings: settings.map(x => ({ ...x, api_key_configured: store.hasApiCredential(store.harnessKeyScope(x.harness, x)) })),
         api_models: store.apiModels().map(m => ({ ...m, key_configured: store.hasApiCredential('model:' + m.id), used_by: settings.filter(x => x.api_ref === m.id).map(x => x.harness) })),
+        credential_cleanup_pending: store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_gc_queue'").get()?store.db.prepare('SELECT scope FROM credential_gc_queue ORDER BY scope').all().map(x=>x.scope):[],
+        file_cleanup_pending,
         tuning: store.tuning(),
         takeover: { ...store.takeover(), previous: undefined, claude_window: claudeCompactWindow(env), plugin: claudePluginEnabled(env) }
       }
@@ -200,7 +204,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     },
     // 接管压缩 on/off and its size; turning it on also sets Claude Code's autoCompactWindow (see src/takeover.js).
     'POST /api/takeover': async req => { const x = await body(req); const r = applyTakeover(store, { enabled: x.enabled === true, ratio: x.ratio, window: x.window === undefined ? undefined : Number(x.window), keep: x.keep === undefined ? undefined : Number(x.keep) }, env); return { ...r, previous: undefined, plugin: claudePluginEnabled(env) } },
-    'POST /api/api-models/delete': async req => { const x = await body(req); return { deleted: store.deleteApiModel(x.id) } },
+    'POST /api/api-models/delete': async req => { const x = await body(req),deleted=store.deleteApiModel(x.id); return { deleted, credential_cleanup_pending:apiCredentialCleanupPending(store.db,'model:'+x.id) } },
     'POST /api/settings': async req => {
       const x = await body(req)
       if (x.scope !== 'global' && x.scope !== 'harness') throw new Error('Invalid settings scope')

@@ -9,9 +9,10 @@ import {forkHash} from './fork-summary.js'
 import {markerFromSummary} from './marker.js'
 import {isDeepStrictEqual} from 'node:util'
 import {semanticLevel,semanticKind} from './tree-semantics.js'
+import {waitForRetry,failureKind} from './fork-retry.js'
 export class MainArchiveFork {
-  constructor(ctx,native,home,warn){
-    this.ctx=ctx;this.native=native;this.file=home;this.warn=warn;this.db=new ArchiveDatabase(native.path);this.store=new ClaudeStore(home);this.jobs=new Map();this.mirrored=new Map();this.stopped=false
+  constructor(ctx,native,home,warn,{report=()=>{}}={}){
+    this.ctx=ctx;this.native=native;this.file=home;this.warn=warn;this.report=report;this.db=new ArchiveDatabase(native.path);this.store=new ClaudeStore(home);this.jobs=new Map();this.mirrored=new Map();this.stopped=false
     this.onTreeSaved=id=>this.mirror(id);registerArchiveCapture(this)
     this.unregister=registerForkArchive(native.path,async(id,tree,receipt)=>{
       const doc=readSettings(home);if(this.stopped||!doc.settings.summaryEnabled)return
@@ -71,7 +72,7 @@ export class MainArchiveFork {
     const receipt=this.db.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sl_fork_receipts'").get()&&this.db.db.prepare('SELECT * FROM sl_fork_receipts WHERE session=?').get(id)
     saveForkTree(this.store,session,{digest:forkHash(nodes.map(n=>n.id)),originals},tree,{model:receipt?.model||'dsh:session-model',usage:receipt?JSON.parse(receipt.usage):{},validate:()=>!this.stopped&&readSettings(this.file).revision===doc.revision})
     this.store.db.exec('CREATE TABLE IF NOT EXISTS dsh_shared_nodes(session TEXT NOT NULL,id TEXT NOT NULL,visible INTEGER NOT NULL,PRIMARY KEY(session,id))')
-    for(const node of tree)if(node.kind==='assembled')this.store.db.prepare('INSERT INTO dsh_shared_nodes VALUES(?,?,0) ON CONFLICT(session,id) DO UPDATE SET visible=0').run(session,node.archiveId)
+    for(const node of tree)if(node.kind==='assembled')this.store.db.prepare('INSERT INTO dsh_shared_nodes SELECT ?,?,0 WHERE EXISTS(SELECT 1 FROM sources WHERE session=?) AND NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?) ON CONFLICT(session,id) DO UPDATE SET visible=0').run(session,node.archiveId,session,session)
     this.mirrored.set(id,stamp)
   }
   afterCapture(id,settled=false){
@@ -79,12 +80,34 @@ export class MainArchiveFork {
     this.capture(id);this.mirror(id)
     const doc=readSettings(this.file)
     if(!settled||!doc.settings.summaryEnabled||doc.settings.takeover||this.jobs.has(id))return
-    const owner=this.db.lease(id,doc.revision);if(!owner)return
     const controller=new AbortController()
-    const timer=setInterval(()=>{try{if(!this.db.renew(id,owner)||readSettings(this.file).revision!==doc.revision)controller.abort(Error('DSH 摘要任务已取消'))}catch(error){controller.abort(error)}},10000);timer.unref()
-    const state={controller,promise:null};this.jobs.set(id,state)
-    let failed=false
-    state.promise=summarizeArchiveFork(this,id,doc,owner,controller.signal).catch(error=>{failed=!controller.signal.aborted;this.warn(error)}).finally(()=>{clearInterval(timer);this.db.release(id,owner,failed);if(this.jobs.get(id)===state)this.jobs.delete(id)})
+    const state={controller,promise:null,owner:null,attempt:0,failures:0,lastErrorKind:null,retryAt:null};this.jobs.set(id,state)
+    const valid=()=>{const current=readSettings(this.file);return !this.stopped&&!this.store.isDeleted(dshSessionKey(id))&&current.revision===doc.revision&&current.settings.summaryEnabled&&!current.settings.takeover}
+    const timer=setInterval(()=>{try{if(!valid()||state.owner&&!this.db.renew(id,state.owner))controller.abort(Error('DSH 摘要任务已取消'))}catch(error){controller.abort(error)}},10000);timer.unref()
+    state.promise=(async()=>{
+      for(;;){
+        controller.signal.throwIfAborted()
+        if(!valid())return
+        const owner=this.db.lease(id,doc.revision)
+        if(!owner){await waitForRetry(1000,controller.signal);continue}
+        state.owner=owner;state.attempt++;state.retryAt=null
+        this.report(id,'summarizing',{attempt:state.attempt,failures:state.failures})
+        let error
+        try{
+          const result=await summarizeArchiveFork(this,id,doc,owner,controller.signal)
+          if(result==='complete')this.report(id,'ready',{attempt:state.attempt,failures:state.failures})
+          return
+        }catch(e){error=e}
+        finally{this.db.release(id,owner);state.owner=null}
+        controller.signal.throwIfAborted()
+        if(!valid())return
+        state.failures++;state.lastErrorKind=failureKind(error)
+        const delay=Math.min(300000,1000*2**Math.min(9,state.failures-1));state.retryAt=Date.now()+delay
+        this.report(id,'retrying',{attempt:state.attempt,failures:state.failures,retryAt:state.retryAt,errorKind:state.lastErrorKind})
+        this.warn(Error(`DSH 后台摘要第 ${state.attempt} 次未完成（${state.lastErrorKind}），将自动重试`))
+        await waitForRetry(delay,controller.signal)
+      }
+    })().catch(error=>{if(!controller.signal.aborted)this.warn(error)}).finally(()=>{clearInterval(timer);if(this.jobs.get(id)===state)this.jobs.delete(id)})
   }
   async close(){this.stopped=true;this.unregister();for(const job of this.jobs.values())job.controller.abort(Error('DSH 归档已停止'));await Promise.allSettled([...this.jobs.values()].map(j=>j.promise));this.db.close();this.store.close()}
 }

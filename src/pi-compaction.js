@@ -77,6 +77,7 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
   }
   const valid = () => {
     signal?.throwIfAborted()
+    if(!store.source(session)||store.isDeleted(session))throw Error('Pi 对话已删除，摘要未保存')
     if (JSON.stringify(readPiPolicy(store.dir)) !== JSON.stringify(policy) || piPreparationRevision(store, session, env) !== revision) throw Error('Pi 压缩设置已变化，保留原上下文')
   }
   store.db.exec('CREATE TABLE IF NOT EXISTS pi_compaction_chunks(session TEXT NOT NULL,key TEXT NOT NULL,summary TEXT NOT NULL,model TEXT NOT NULL,PRIMARY KEY(session,key))')
@@ -89,7 +90,10 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
     const key = hash(JSON.stringify([SUMMARY_POLICY_VERSION, revision, language, level, source]))
     usedKeys.push(key)
     const saved = store.db.prepare('SELECT summary FROM pi_compaction_chunks WHERE session=? AND key=?').get(session, key)
-    if (saved && !isReducedSummary(saved.summary)&&!store.db.prepare('SELECT 1 FROM pi_rejected_chunks WHERE session=? AND key=?').get(session,key)) { cached++; return checkedSummary(saved.summary, { language, requireHeading: true }) }
+    if (saved && !isReducedSummary(saved.summary)&&!store.db.prepare('SELECT 1 FROM pi_rejected_chunks WHERE session=? AND key=?').get(session,key)) {
+      try {const summary=checkedSummary(saved.summary,{language,requireHeading:true});cached++;return summary}
+      catch {store.db.prepare('INSERT OR IGNORE INTO pi_rejected_chunks VALUES(?,?)').run(session,key)}
+    }
     const summary = checkedSummary(await summarize(source, {
       model: setting.model, apiProvider: setting.api_provider, apiURL: setting.api_url, apiKey,
       effort: setting.api_effort, profileStore: store, signal, timeoutMs: 180000,
@@ -98,7 +102,8 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
     }), { language, requireHeading: true })
     if (isReducedSummary(summary)) throw Error('Pi 摘要被机械截短，保留原上下文')
     valid(); calls++
-    store.db.prepare('INSERT INTO pi_compaction_chunks VALUES(?,?,?,?) ON CONFLICT(session,key) DO UPDATE SET summary=excluded.summary,model=excluded.model').run(session, key, summary, setting.model)
+    const inserted=store.db.prepare('INSERT INTO pi_compaction_chunks SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM sources WHERE session=?) AND NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?) ON CONFLICT(session,key) DO UPDATE SET summary=excluded.summary,model=excluded.model').run(session,key,summary,setting.model,session,session)
+    if(!inserted.changes)throw Error('Pi 对话已删除，摘要未保存')
     store.db.prepare('DELETE FROM pi_rejected_chunks WHERE session=? AND key=?').run(session,key)
     return summary
   }
@@ -174,7 +179,8 @@ export async function preparePi(store, input, options) {
   preparedSchema(store)
   const {source,sourceMessages,protectedRequest,forkSummary,...snapshot}=input
   snapshot.sourceTokens??=estimateSummaryTokens(source)
-  store.db.prepare('INSERT OR REPLACE INTO pi_prepared_compactions VALUES(?,?,?,?,?)').run(session,input.draftKey,compaction.details.summaryRevision,JSON.stringify(snapshot),JSON.stringify(compaction))
+  const inserted=store.db.prepare('INSERT OR REPLACE INTO pi_prepared_compactions SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM sources WHERE session=?) AND NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?)').run(session,input.draftKey,compaction.details.summaryRevision,JSON.stringify(snapshot),JSON.stringify(compaction),session,session)
+  if(!inserted.changes)throw Error('Pi 对话已删除，摘要未保存')
   // One ready prefix per session. Newer attempts replace it only after completion.
   store.db.prepare('DELETE FROM pi_prepared_compactions WHERE session=? AND draft_key<>?').run(session,input.draftKey)
   return {draftKey:input.draftKey,compaction}
@@ -186,8 +192,14 @@ export function readPreparedPi(store,input,{env=process.env}={}) {
   const session='pi-'+input.session_id
   const saved=store.db.prepare('SELECT * FROM pi_prepared_compactions WHERE session=? AND draft_key=?').get(session,input.draftKey)
   if(!saved||!store.source(session)||store.isDeleted(session)||piPreparationRevision(store,session,env)!==saved.revision)return null
-  const snapshot=JSON.parse(saved.snapshot),compaction=JSON.parse(saved.compaction)
-  if(!Number.isFinite(snapshot.sourceTokens)||estimateSummaryTokens(compaction.summary)>=snapshot.sourceTokens)return null
+  const discard=()=>{store.db.prepare('DELETE FROM pi_prepared_compactions WHERE session=? AND draft_key=? AND revision=? AND snapshot=? AND compaction=?').run(session,input.draftKey,saved.revision,saved.snapshot,saved.compaction);return null}
+  let snapshot,compaction
+  try{snapshot=JSON.parse(saved.snapshot);compaction=JSON.parse(saved.compaction)}catch{return discard()}
+  if(!snapshot||typeof snapshot!=='object'||!compaction||typeof compaction!=='object'||!compaction.details||typeof compaction.details!=='object'||
+    typeof snapshot.session_file!=='string'||typeof snapshot.leafId!=='string'||typeof snapshot.firstKeptEntryId!=='string'||
+    compaction.firstKeptEntryId!==snapshot.firstKeptEntryId||!Number.isFinite(snapshot.sourceTokens)||snapshot.sourceTokens<=0)return discard()
+  try{checkedSummary(compaction.summary,{requireHeading:true,maxChars:null})}catch{return discard()}
+  if(estimateSummaryTokens(compaction.summary)>=snapshot.sourceTokens)return discard()
   if(compaction.details.ratio!==readPiPolicy(store.dir).ratio)return null
   const captured=capturePi(store,{session_id:input.session_id,session_file:snapshot.session_file},{env,automatic:true})
   if(captured.skipped)return null

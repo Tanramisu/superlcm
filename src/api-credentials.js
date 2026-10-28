@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import {DatabaseSync} from 'node:sqlite'
 import {randomBytes} from 'node:crypto'
 import {privateDirectory,privateFile} from './private-path.js'
@@ -16,18 +16,20 @@ function credentials(dir) {
   return value
 }
 function access(dir,mutate){
-  const old=credentials(dir),file=join(dir,'api-credentials.sqlite')
-  if(!mutate&&!existsSync(file))return old
+  const file=join(dir,'api-credentials.sqlite')
+  if(!mutate&&!existsSync(file))return credentials(dir)
   privateDirectory(dir);privateFile(file)
   const db=new DatabaseSync(file)
   try{
     db.exec('PRAGMA busy_timeout=10000; CREATE TABLE IF NOT EXISTS credentials(scope TEXT PRIMARY KEY,value TEXT NOT NULL)')
     if(mutate){
       db.exec('BEGIN IMMEDIATE')
+      const old=credentials(dir) // Read under the credential lock, so cleanup cannot restore an old JSON key.
       for(const [scope,value] of Object.entries(old))if(scopeValid(scope))db.prepare('INSERT OR IGNORE INTO credentials VALUES(?,?)').run(scope,JSON.stringify(value))
       mutate(db)
       db.exec('COMMIT')
     }
+    const old=credentials(dir)
     return {...old,...Object.fromEntries(db.prepare('SELECT scope,value FROM credentials').all().map(r=>[r.scope,JSON.parse(r.value)]))}
   }catch(error){if(db.isTransaction)db.exec('ROLLBACK');throw error}finally{db.close()}
 }
@@ -60,6 +62,19 @@ function valueFor(dir,scope){
 }
 export function bindApiKey(db,scope,revision){
   if(!scopeValid(scope)||revision!==null&&(typeof revision!=='string'||!/^[a-f0-9]{32}$/.test(revision)))throw Error('Invalid API credential binding')
+  if(revision!==null){
+    if(db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_retired_scopes'").get()&&db.prepare('SELECT 1 FROM credential_retired_scopes WHERE scope=?').get(scope))throw Error('API model was deleted; credential cannot be rebound')
+    const main=db.prepare('PRAGMA database_list').all().find(x=>x.name==='main')?.file
+    if(!main)throw Error('API credential binding requires a persistent database')
+    const file=join(dirname(main),'api-credentials.sqlite')
+    if(!existsSync(file))throw Error('API credential revision is missing')
+    const secrets=new DatabaseSync(file,{readOnly:true})
+    try{
+      if(!secrets.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_versions'").get()||!secrets.prepare('SELECT 1 FROM credential_versions WHERE scope=? AND revision=?').get(scope,revision))throw Error('API credential revision is missing')
+    }finally{secrets.close()}
+    db.exec('CREATE TABLE IF NOT EXISTS credential_published(scope TEXT NOT NULL,revision TEXT PRIMARY KEY)')
+    db.prepare('INSERT OR IGNORE INTO credential_published VALUES(?,?)').run(scope,revision)
+  }
   db.exec('CREATE TABLE IF NOT EXISTS credential_bindings(scope TEXT PRIMARY KEY,revision TEXT)')
   db.prepare('INSERT INTO credential_bindings VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision').run(scope,revision)
 }
@@ -80,7 +95,9 @@ export function stageApiKey(dir,scope,key,endpoint=null){
   const revision=randomBytes(16).toString('hex'),value=endpoint===null?key:{key,endpoint}
   access(dir,db=>{
     db.exec('CREATE TABLE IF NOT EXISTS credential_versions(revision TEXT PRIMARY KEY,scope TEXT NOT NULL,value TEXT NOT NULL)')
+    db.exec('CREATE TABLE IF NOT EXISTS credential_staging(revision TEXT PRIMARY KEY,scope TEXT NOT NULL,created_ms INTEGER NOT NULL)')
     db.prepare('INSERT INTO credential_versions VALUES(?,?,?)').run(revision,scope,JSON.stringify(value))
+    db.prepare('INSERT INTO credential_staging VALUES(?,?,?)').run(revision,scope,Date.now())
   })
   return revision
 }
@@ -99,13 +116,74 @@ export function readApiKey(dir,scope,endpoint) {
   return typeof value==='string'&&value.length>=8?value:null
 }
 export function saveApiKey(dir,scope,key,endpoint=null) {
-  const revision=stageApiKey(dir,scope,key,endpoint)
-  bindStandalone(dir,scope,revision)
-  return true
+  privateDirectory(dir);const file=join(dir,'lcm.sqlite');privateFile(file)
+  const db=new DatabaseSync(file)
+  try{
+    db.exec('PRAGMA busy_timeout=10000; BEGIN IMMEDIATE')
+    if(db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_retired_scopes'").get()&&db.prepare('SELECT 1 FROM credential_retired_scopes WHERE scope=?').get(scope))throw Error('API model was deleted; credential cannot be rebound')
+    bindApiKey(db,scope,stageApiKey(dir,scope,key,endpoint))
+    db.exec('COMMIT');return true
+  }catch(error){if(db.isTransaction)db.exec('ROLLBACK');throw error}finally{db.close()}
 }
 export function removeApiKey(dir,scope) {
   if(!scopeValid(scope))throw new Error('Invalid API credential scope')
   if(!valueFor(dir,scope))return false
   bindStandalone(dir,scope,null)
   return true
+}
+
+// Queue the cleanup in the same transaction that unbinds the model. The
+// separate credential database can then be cleaned without risking rollback of
+// the model deletion or removing a revision another writer is publishing.
+export function queueApiCredentialCleanup(db,scope){
+  if(!scopeValid(scope))throw Error('Invalid API credential scope')
+  db.exec('CREATE TABLE IF NOT EXISTS credential_gc_queue(scope TEXT PRIMARY KEY)')
+  db.prepare('INSERT OR IGNORE INTO credential_gc_queue VALUES(?)').run(scope)
+}
+export function apiCredentialCleanupPending(db,scope){
+  return !!db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_gc_queue'").get()&&!!db.prepare('SELECT 1 FROM credential_gc_queue WHERE scope=?').get(scope)
+}
+export function cleanupApiCredential(db,dir,scope){
+  if(!apiCredentialCleanupPending(db,scope))return false
+  db.exec('BEGIN IMMEDIATE')
+  try{
+    const current=db.prepare('SELECT revision FROM credential_bindings WHERE scope=?').get(scope)
+    if(!current||current.revision!==null){db.exec('COMMIT');return false}
+    const file=join(dir,'api-credentials.sqlite'),legacy=keyFile(dir)
+    // The lock also serializes migration from the old JSON file.
+    privateDirectory(dir);privateFile(file)
+    const secrets=new DatabaseSync(file);let waiting=0
+    try{
+      secrets.exec('PRAGMA busy_timeout=10000; PRAGMA secure_delete=ON; BEGIN IMMEDIATE')
+      const old=credentials(dir)
+      if(Object.hasOwn(old,scope)){
+        delete old[scope]
+        const temp=join(dir,`.api-credentials-${randomBytes(12).toString('hex')}.tmp`)
+        try{writeFileSync(temp,JSON.stringify(old),{flag:'wx',mode:0o600});renameSync(temp,legacy)}
+        finally{try{unlinkSync(temp)}catch(error){if(error.code!=='ENOENT')throw error}}
+      }
+      if(secrets.prepare("SELECT 1 FROM sqlite_master WHERE name='credentials'").get())secrets.prepare('DELETE FROM credentials WHERE scope=?').run(scope)
+      if(secrets.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_versions'").get()){
+        const hasStaging=!!secrets.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_staging'").get()
+        const hasPublished=!!db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_published'").get()
+        const published=hasPublished?db.prepare('SELECT 1 FROM credential_published WHERE scope=? AND revision=?'):null
+        const staging=hasStaging?secrets.prepare('SELECT created_ms FROM credential_staging WHERE revision=?'):null
+        for(const row of secrets.prepare('SELECT revision FROM credential_versions WHERE scope=?').all(scope)){
+          const pending=staging?.get(row.revision)
+          // A not-yet-published revision may belong to another writer. Keep it
+          // for a day; a later attempt to bind an expired one fails safely.
+          if(pending&&!published?.get(scope,row.revision)&&Date.now()-pending.created_ms<86400000){waiting++;continue}
+          secrets.prepare('DELETE FROM credential_versions WHERE revision=? AND scope=?').run(row.revision,scope)
+          if(staging)secrets.prepare('DELETE FROM credential_staging WHERE revision=?').run(row.revision)
+        }
+      }
+      secrets.exec('COMMIT')
+    }catch(error){if(secrets.isTransaction)secrets.exec('ROLLBACK');throw error}finally{secrets.close()}
+    if(!waiting)db.prepare('DELETE FROM credential_gc_queue WHERE scope=?').run(scope)
+    db.exec('COMMIT');return !waiting
+  }catch(error){if(db.isTransaction)db.exec('ROLLBACK');throw error}
+}
+export function retryApiCredentialCleanup(db,dir){
+  if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_gc_queue'").get())return
+  for(const {scope} of db.prepare('SELECT scope FROM credential_gc_queue').all())try{cleanupApiCredential(db,dir,scope)}catch{}
 }

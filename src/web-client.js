@@ -147,8 +147,8 @@ function openDelete(c) {
     '<div class="actions"><button type="button" class="btn danger" id="delGo">' + t('删除') + '</button><button type="button" class="btn" data-close>' + t('取消') + '</button></div></div></div></div>', root => {
     const go = root.querySelector('#delGo')
     go.onclick = () => act(async () => {
-      await api('/api/delete', { session: c.session })
-      closeOverlay(); toast(t('已删除'))
+      const result=await api('/api/delete', { session: c.session })
+      closeOverlay(); toast(result.file_cleanup_pending?t('对话已删除，部分档案文件等待清理'):t('已删除'))
       if (state.sel === c.session) { state.sel = null; state.detail = null; $('#detail').innerHTML = ''; $('#conv').classList.remove('show-detail') }
       await loadConversations()
     }, go)

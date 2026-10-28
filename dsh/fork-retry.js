@@ -2,7 +2,7 @@ import {currentPolicy} from './ratio-runtime.js'
 import {locateStableSpan} from './async-region.js'
 import {summaryFailureCode} from './summary-session.js'
 
-function waitForRetry(ms,signal) {
+export function waitForRetry(ms,signal) {
   signal.throwIfAborted()
   return new Promise((resolve,reject)=>{
     const finish=(fn,value)=>{clearTimeout(timer);signal.removeEventListener('abort',cancel);fn(value)}
@@ -13,7 +13,7 @@ function waitForRetry(ms,signal) {
   })
 }
 
-function failureKind(error) {
+export function failureKind(error) {
   if(error?.summaryKind==='timeout'||error?.name==='TimeoutError')return 'timeout'
   if(error?.code==='SUPERLCM_FORK_CAPACITY')return 'capacity'
   if(['stream_cutoff','stream_empty'].includes(error?.summaryKind))return error.summaryKind

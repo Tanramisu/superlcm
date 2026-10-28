@@ -46,6 +46,7 @@ export function captureDshPacket(store, packet, {clientKind='hook',legacyCapture
   store.db.exec('BEGIN IMMEDIATE')
   try {
     if(store.isDeleted(session)) {
+      if(clientKind!=='import'){store.db.exec('COMMIT');return {session,skipped:'deleted'}}
       for(const table of ['deleted_sessions','dsh_mirrors','dsh_event_digests'])store.db.prepare('DELETE FROM '+table+' WHERE session=?').run(session)
     }
     const saved = store.db.prepare('SELECT * FROM dsh_mirrors WHERE session=?').get(session)
@@ -91,7 +92,8 @@ export function captureDshPacket(store, packet, {clientKind='hook',legacyCapture
     store.db.exec('COMMIT')
   } catch (error) { store.db.exec('ROLLBACK'); throw error }
   if (existsSync(file)) {
-    store.ingest(session, file)
+    const indexed=store.ingest(session,file,'jsonl',{automatic:clientKind!=='import'})
+    if(indexed.skipped)return indexed
     // Importing or replaying history is not new conversation activity. Keep
     // the list ordered by the native last event, rather than archive time.
     store.db.exec('BEGIN IMMEDIATE')

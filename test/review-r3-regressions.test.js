@@ -83,7 +83,7 @@ test('a formerly complete Claude node is not certified by a pre-fix quality flag
   store.setMetadata('s',{harness:'claude-code',externalId:'synthetic'})
   const old={session:'s',id:'old-quality',level:0,first:0,last:0,children:[],summary:'Old summary',digest:'old',model:'old'}
   store.addNode(old);assert.equal(store.nodeSourceIncomplete('s',old),false)
-  store.db.prepare('DELETE FROM claude_node_coverage_v2 WHERE session=? AND id=?').run('s',old.id)
+  store.db.prepare('DELETE FROM claude_node_coverage_v3 WHERE session=? AND id=?').run('s',old.id)
   assert.equal(store.nodeSourceIncomplete('s',old),true)
   store.addNode({...old,sourceComplete:true})
   assert.equal(store.nodeSourceIncomplete('s',old),true,'reinserting the old id cannot upgrade its evidence')
@@ -98,7 +98,7 @@ test('deleting a synthetic session also removes summary quality and alternate te
   store.db.exec('CREATE TABLE fork_parent_variants(session TEXT,id TEXT,summary TEXT,PRIMARY KEY(session,id))')
   store.db.prepare('INSERT INTO fork_parent_variants VALUES(?,?,?)').run('s','n','Synthetic alternate')
   store.deleteSession('s')
-  for(const table of ['summary_node_quality','claude_node_coverage_v2','fork_parent_variants'])assert.equal(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE session=?`).get('s').n,0)
+  for(const table of ['summary_node_quality','claude_node_coverage_v2','claude_node_coverage_v3','fork_parent_variants'])assert.equal(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE session=?`).get('s').n,0)
 })
 
 test('an uncertified old node cannot mark a native checkpoint as covered',t=>{
@@ -213,7 +213,7 @@ test('ordinary Claude takeover does not discard a live image hidden by the text-
   try{s.addNode({session:h.id,id:'covered',level:0,first:0,last:5,children:[],summary:'# State\nThree tasks finished.',digest:'d',model:'offline',sourceComplete:true})}finally{s.close()}
   const live=h.messages.map(m=>({...liveMessage(m),toolResults:m.toolResults?.length?1:0}))
   const denied=await h.cli('compact-packet',{messages:live,tokens:h.tokens,window:h.window,trigger:'auto'})
-  assert.equal(denied.use,false);assert.match(denied.reason,/not fully verified/)
+  assert.equal(denied.use,false);assert.match(denied.reason,/not fully verified|incomplete-source/)
 })
 
 test('verification does not retain every previously summarized original',t=>{

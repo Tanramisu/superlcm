@@ -86,7 +86,7 @@ async function runArchiveFork(service,id,doc,owner,signal,{force},progress){
   }finally{scoped?.dispose()}
   signal.throwIfAborted()
   const current=service.forkRequests.get(id)
-  if(current?.provider!==request.provider||current?.model!==request.model)throw Error('聊天模型已变化，摘要未保存')
+  if(current!==request)throw Error('聊天请求已变化，摘要未保存')
   const tree=parseForkTree(text,leaves,language,options),digest=forkHash([doc.revision,selected.map(r=>[r.seq,r.event])])
   const ids=tree.map(n=>'fork-'+forkHash([id,digest,n.index]).slice(0,24))
   const nodes=tree.map(n=>({id:ids[n.index],level:n.semanticLevel??n.level,kind:n.kind,modelSummary:n.modelSummary,first:leaves[0].sources[0],last:leaves.at(-1).sources.at(-1),children:n.children.map(i=>ids[i]),summary:n.summary,

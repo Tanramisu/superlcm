@@ -40,7 +40,7 @@ export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,wind
  const source=store.source(id),file=source?.path||firstTranscript(id,env)
  if(!file||!existsSync(file))return {none:'not recorded yet'}
  if(source&&store.metadata(id).harness!=='claude-code')return {none:'different source harness'}
- store.ingest(id,file)
+ if(store.ingest(id,file,'jsonl',{automatic:true}).skipped)return {none:'deleted'}
  if(!source)store.setMetadata(id,{harness:'claude-code',externalId:id})
  const setting=store.effectiveSetting(id,env),{mode,model}=setting
  if(['off','cli','api','main-fork'].includes(mode))store.setSummaryMode(id,mode)

@@ -8,6 +8,8 @@ After each turn, SuperLcm copies the conversation from the connected tool's own 
 
 You can delete a conversation from the console, and removing the folder removes everything SuperLcm has stored.
 
+Deleting a custom model unbinds its key and cleans unreachable versions from that model's scope in the credential database and the legacy JSON file. A copy used by another model or setting remains in its own scope. Cleanup waits for any credential save in progress and retries later if it cannot finish; the Settings page identifies scopes still awaiting cleanup. This removes live database entries, not copies in backups, filesystem snapshots, or existing SQLite journals. Conversation deletion likewise removes SuperLcm's live records, not the original transcript held by the tool or copies in backups and snapshots.
+
 ## What leaves your computer
 
 Only summary writing can send conversation text anywhere, and only to a model you have chosen, in the mode you pick per tool:

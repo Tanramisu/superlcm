@@ -94,6 +94,7 @@ const ranges = seqs => {
 }
 
 export function syncDshSummaries(store, session, id) {
+  if(!store.source(session)||store.isDeleted(session))return
   store.db.exec(`CREATE TABLE IF NOT EXISTS dsh_node_sources(session TEXT NOT NULL,id TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(session,id,seq));
     CREATE TABLE IF NOT EXISTS dsh_shared_nodes(session TEXT NOT NULL,id TEXT NOT NULL,visible INTEGER NOT NULL,PRIMARY KEY(session,id));
     CREATE TABLE IF NOT EXISTS dsh_record_kinds(session TEXT NOT NULL,seq INTEGER NOT NULL,category TEXT NOT NULL,PRIMARY KEY(session,seq));
@@ -105,6 +106,7 @@ export function syncDshSummaries(store, session, id) {
   const remember = store.db.prepare('INSERT OR IGNORE INTO dsh_record_kinds VALUES(?,?,?)')
   store.db.exec('BEGIN IMMEDIATE')
   try {
+    if(!store.source(session)||store.isDeleted(session)){store.db.exec('COMMIT');return}
     for (const [seq, category] of categories) remember.run(session, seq, category)
     const revision = store.db.prepare('INSERT INTO dsh_record_revisions VALUES(?,?,?) ON CONFLICT(session,seq) DO UPDATE SET replaced_by=excluded.replaced_by')
     for (const [seq, replacement] of revisions) revision.run(session, seq, replacement)
@@ -159,6 +161,7 @@ export function syncDshSummaries(store, session, id) {
   // and source envelopes. Native nodes and original events remain immutable.
   store.db.exec('BEGIN IMMEDIATE')
   try {
+    if(!store.source(session)||store.isDeleted(session)){store.db.exec('COMMIT');return}
     const visibility = store.db.prepare('INSERT INTO dsh_shared_nodes VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET visible=excluded.visible')
     // A newly prepared native-identity tree remains usable before its actual
     // compaction commits. Only committed native rows can retire its members.

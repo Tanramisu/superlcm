@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {lab,history,send,close,count} from './reliability/lab.mjs'
+import {lab,history,send,close,count,until} from './reliability/lab.mjs'
 import {MainArchiveFork} from '../dsh/main-archive-fork.js'
 import {forkScope} from '../dsh/fork-scope.js'
 import {captureDshPacket,projectDshEvent,dshSessionKey} from '../src/dsh.js'
@@ -44,6 +44,66 @@ test('passive DSH summary aborts after ten minutes without meaningful progress',
   await flush();assert.equal(started,true);t.mock.timers.tick(600001);await failure
   assert.equal(f.saved.length,0)
  }finally{t.mock.timers.reset();release?.()}
+})
+
+test('passive DSH retries temporary failures without another conversation event',async t=>{
+ const h=await lab({capacity:64000,config:{auto:false,summaryMode:'main-fork'}}),store=new ClaudeStore(h.dir);let forks,attempts=0
+ try{
+  store.setGlobalSetting('main-fork');forks=new MainArchiveFork(h.ctx,h.engine.superLcmStore,h.dir,error=>h.warnings.push(error.message));history(h,.72)
+  const original=h.ctx.llm.stream.bind(h.ctx.llm)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   attempts++;if(attempts<=3)throw Error('synthetic temporary failure')
+   const prompt=options.messages.at(-1).content.map(b=>b.text||'').join(''),plan=JSON.parse(prompt.split('\n').find(x=>x.startsWith('[{"index":')))
+   yield {type:'text-delta',text:JSON.stringify({blocks:plan.map(n=>({index:n.index,summary:'# Historical state\nPreserve the original request and pending inspection.'}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  await send(h,'Synthetic request.')
+  captureDshPacket(store,{header:h.agent.session.header,records:h.agent.session.snapshotEvents().map(e=>projectDshEvent(h.id,e,JSON.stringify(e.data)))})
+  const surface=h.agent.session.surface.nodes.slice()
+  t.mock.timers.enable({apis:['setTimeout','Date']});forks.afterCapture(h.id,true)
+  const state=forks.jobs.get(h.id);assert.ok(state)
+  for(let i=1;i<=3;i++){
+   await until(()=>state.failures===i&&state.retryAt!==null)
+   assert.equal(attempts,i);assert.equal(count(h,'compaction/summary'),0)
+   assert.equal(state.lastErrorKind,'invalid_summary')
+   t.mock.timers.tick(state.retryAt-Date.now())
+  }
+  await state.promise
+  assert.equal(attempts,4);assert.equal(forks.jobs.size,0)
+  assert.deepEqual(h.agent.session.surface.nodes,surface)
+  assert.ok(store.roots(dshSessionKey(h.id)).length)
+ }finally{t.mock.timers.reset();await forks?.close();store.close();await close(h)}
+})
+
+test('passive DSH retry stops after settings change and on shutdown',async t=>{
+ const h=await lab({capacity:64000,config:{auto:false,summaryMode:'main-fork'}}),store=new ClaudeStore(h.dir);let forks,attempts=0
+ try{
+  store.setGlobalSetting('main-fork');forks=new MainArchiveFork(h.ctx,h.engine.superLcmStore,h.dir,error=>h.warnings.push(error.message));history(h,.72)
+  const original=h.ctx.llm.stream.bind(h.ctx.llm)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){attempts++;throw Error('temporary fixture error')})()
+  await send(h,'Synthetic request.')
+  captureDshPacket(store,{header:h.agent.session.header,records:h.agent.session.snapshotEvents().map(e=>projectDshEvent(h.id,e,JSON.stringify(e.data)))})
+  t.mock.timers.enable({apis:['setTimeout','Date']});forks.afterCapture(h.id,true)
+  const first=forks.jobs.get(h.id);await until(()=>first.failures===1&&first.retryAt!==null)
+  store.setGlobalSetting('off');t.mock.timers.tick(first.retryAt-Date.now());await first.promise
+  assert.equal(attempts,1);assert.equal(forks.jobs.size,0)
+  store.setGlobalSetting('main-fork');forks.afterCapture(h.id,true)
+  const second=forks.jobs.get(h.id);await until(()=>second.failures===1&&second.retryAt!==null)
+  await forks.close();forks=null;assert.equal(attempts,2)
+ }finally{t.mock.timers.reset();await forks?.close();store.close();await close(h)}
+})
+
+test('a changed DSH request cannot publish an obsolete passive fork',async()=>{
+ let release,started=false
+ const f=idleFixture(options=>(async function*(){
+  const prompt=options.messages.at(-1).content.map(b=>b.text||'').join(''),plan=JSON.parse(prompt.split('\n').find(x=>x.startsWith('[{"index":')))
+  started=true;await new Promise(resolve=>release=resolve)
+  yield {type:'text-delta',text:JSON.stringify({blocks:plan.map(n=>({index:n.index,summary:'# State\nThe task remains pending.'}))})}
+  yield {type:'finish',reason:{kind:'stop'}}
+ })())
+ const pending=summarizeArchiveFork(f.service,'synthetic',f.doc,'owner',new AbortController().signal)
+ await until(()=>started);f.service.forkRequests.set('synthetic',{...f.service.forkRequests.get('synthetic')})
+ release();await assert.rejects(pending,/请求已变化/);assert.equal(f.saved.length,0)
 })
 test('integrated DSH archives a complete native fork tree with takeover off',async()=>{
  const h=await lab({capacity:64000,config:{auto:false,summaryMode:'main-fork'}}),store=new ClaudeStore(h.dir);let forks

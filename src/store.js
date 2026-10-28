@@ -5,13 +5,16 @@ import { initializeEventCounts } from './event-counts.js'
 import { codexHeadlessRecord, codexHeadlessStatus } from './codex.js'
 import { initializeSummaryRuns, latestSummaryRun, summaryRunHistory, recoverSummaryRuns } from './summary-runs.js'
 import { claudeSidecarTitle } from './conversation-names.js'
-import {claudeDirectSources} from './claude-checkpoints.js'
+import {claudeDirectSources,rescueHash,rescueSourceHash} from './claude-checkpoints.js'
+import {coversSummaryRange} from './summary-merge.js'
+import {isReducedSummary} from './summary-fitting.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
 import { validModel } from './runtime.js'
 import { summaryMode } from './mode.js'
 import {legacyDshSource} from './dsh-evidence.js'
 import { dshCoverage, dshNodeSources, dshVisibleNodes } from './dsh-summaries.js'
 import { normalizeApiEndpoint, loopbackEndpoint, EFFORTS, validApiModel } from './api-endpoint.js'
-import { readApiKey, saveApiKey, removeApiKey } from './api-credentials.js'
+import { readApiKey, saveApiKey, bindApiKey, queueApiCredentialCleanup, cleanupApiCredential, retryApiCredentialCleanup } from './api-credentials.js'
 import { takeoverDefaults, takeoverLimits } from './compaction.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { closeSync, existsSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
@@ -84,6 +87,7 @@ export class ClaudeStore {
       CREATE INDEX IF NOT EXISTS nodes_coverage ON nodes(session,last);
       CREATE TABLE IF NOT EXISTS summary_node_quality(session TEXT,id TEXT,complete INTEGER NOT NULL,PRIMARY KEY(session,id));
       CREATE TABLE IF NOT EXISTS claude_node_coverage_v2(session TEXT,id TEXT,PRIMARY KEY(session,id));
+      CREATE TABLE IF NOT EXISTS claude_node_coverage_v3(session TEXT,id TEXT,PRIMARY KEY(session,id));
       CREATE TABLE IF NOT EXISTS credential_bindings(scope TEXT PRIMARY KEY,revision TEXT);
       CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(session UNINDEXED, id UNINDEXED, summary);
       CREATE TABLE IF NOT EXISTS leases(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
@@ -101,6 +105,7 @@ export class ClaudeStore {
       CREATE TABLE IF NOT EXISTS harness_summary_settings(harness TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('off','cli','codex-cli','api','agent')), model TEXT);
       CREATE TABLE IF NOT EXISTS integrations(harness TEXT PRIMARY KEY,enabled INTEGER NOT NULL,revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS deleted_sessions(session TEXT PRIMARY KEY, deleted_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS deleted_session_files(session TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(session,path));
       CREATE TABLE IF NOT EXISTS compactions(session TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(session,ordinal));
       CREATE TABLE IF NOT EXISTS takeover_settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, window INTEGER NOT NULL, previous TEXT);
       CREATE TABLE IF NOT EXISTS takeover_copies(session TEXT PRIMARY KEY, remaining INTEGER NOT NULL);
@@ -159,6 +164,8 @@ export class ClaudeStore {
     }
     migrateSummaryModes(this.db)
     this.backfillHeadless()
+    retryApiCredentialCleanup(this.db,this.dir)
+    try{this.cleanupDeletedFiles()}catch{}
   }
   close() { this.db.close() }
   classifyHeadless(session) {
@@ -311,15 +318,31 @@ export class ClaudeStore {
     // The same model may be added again with another 思考程度.
     if(this.apiModels().some(y=>y.id!==id&&y.provider===m.provider&&y.url===m.url&&y.model===m.model&&y.effort===m.effort))throw new Error('This model is already added with the same reasoning effort')
     if(id)this.db.prepare('UPDATE api_models SET label=?,provider=?,url=?,model=?,effort=? WHERE id=?').run(m.label,m.provider,m.url,m.model,m.effort,id)
-    else {id=randomBytes(4).toString('hex');this.db.prepare('INSERT INTO api_models(id,label,provider,url,model,effort,created_ms) VALUES(?,?,?,?,?,?,?)').run(id,m.label,m.provider,m.url,m.model,m.effort,Date.now())}
+    else {
+      const retired=this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='credential_retired_scopes'").get()?this.db.prepare('SELECT 1 FROM credential_retired_scopes WHERE scope=?'):null
+      do{id=randomBytes(4).toString('hex')}while(this.apiModel(id)||retired?.get('model:'+id))
+      this.db.prepare('INSERT INTO api_models(id,label,provider,url,model,effort,created_ms) VALUES(?,?,?,?,?,?,?)').run(id,m.label,m.provider,m.url,m.model,m.effort,Date.now())
+    }
     return this.apiModel(id)
   }
   deleteApiModel(id) {
-    if(!this.apiModel(id))throw new Error('Unknown API model')
-    const users=this.db.prepare("SELECT harness FROM harness_summary_settings WHERE api_ref=? AND harness<>'hermes'").all(id).map(x=>x.harness)
-    if(users.length)throw new Error('Still used by '+users.join(', ')+'; pick another method for it first')
-    this.db.prepare("UPDATE harness_summary_settings SET api_ref=NULL WHERE harness='hermes' AND api_ref=?").run(id)
-    this.db.prepare('DELETE FROM api_models WHERE id=?').run(id);removeApiKey(this.dir,'model:'+id)
+    const scope='model:'+id
+    this.db.exec('BEGIN IMMEDIATE')
+    try{
+      if(!this.apiModel(id))throw new Error('Unknown API model')
+      const users=this.db.prepare("SELECT harness FROM harness_summary_settings WHERE api_ref=? AND harness<>'hermes'").all(id).map(x=>x.harness)
+      if(users.length)throw new Error('Still used by '+users.join(', ')+'; pick another method for it first')
+      this.db.prepare("UPDATE harness_summary_settings SET api_ref=NULL WHERE harness='hermes' AND api_ref=?").run(id)
+      bindApiKey(this.db,scope,null)
+      this.db.exec('CREATE TABLE IF NOT EXISTS credential_retired_scopes(scope TEXT PRIMARY KEY)')
+      this.db.prepare('INSERT OR IGNORE INTO credential_retired_scopes VALUES(?)').run(scope)
+      queueApiCredentialCleanup(this.db,scope)
+      this.db.prepare('DELETE FROM api_models WHERE id=?').run(id)
+      this.db.exec('COMMIT')
+    }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error}
+    // A failed cleanup stays queued and is reported by the console; it must
+    // not make the already committed model deletion appear to have failed.
+    try{cleanupApiCredential(this.db,this.dir,scope)}catch{}
     return true
   }
   setGlobalSetting(mode,model=null,apiProvider=null,apiURL=null) {
@@ -611,12 +634,15 @@ export class ClaudeStore {
       } finally { closeSync(source) }
     } finally { closeSync(archived) }
   }
-  ingest(session, path, kind = 'jsonl') {
+  ingest(session, path, kind = 'jsonl', {automatic = false} = {}) {
     // Serialize the cursor snapshot, archive copy and indexing across processes.
     // Commit completed records even if a later malformed/oversized row fails,
     // preserving the established incremental recovery and status behavior.
     this.db.exec('BEGIN IMMEDIATE')
-    try { return this.#ingestLocked(session,path,kind) }
+    try {
+      if(automatic&&this.isDeleted(session))return {session,skipped:'deleted'}
+      return this.#ingestLocked(session,path,kind)
+    }
     finally {
       try { this.db.exec('COMMIT') }
       catch(error){try{this.db.exec('ROLLBACK')}catch{};throw error}
@@ -666,29 +692,65 @@ export class ClaudeStore {
   // The copy is exactly source bytes [0, offset), so event offsets address it unchanged.
   // Deleted conversations stay deleted: automatic capture (hooks) checks this before indexing again.
   isDeleted(session) { return Boolean(this.db.prepare('SELECT 1 FROM deleted_sessions WHERE session=?').get(session)) }
+  cleanupDeletedFiles(session=null) {
+    const sessions=session?[{session}]:this.db.prepare('SELECT DISTINCT session FROM deleted_session_files').all()
+    for(const row of sessions){
+      this.db.exec('BEGIN IMMEDIATE')
+      try{
+        // Import and cleanup serialize on this transaction. Never remove a
+        // file after an explicit import has revived the same conversation.
+        if(!this.isDeleted(row.session)||this.source(row.session))this.db.prepare('DELETE FROM deleted_session_files WHERE session=?').run(row.session)
+        else for(const {path} of this.db.prepare('SELECT path FROM deleted_session_files WHERE session=?').all(row.session)){
+          const rel=relative(this.dir,path)
+          if(!rel||rel.startsWith('..')||isAbsolute(rel))continue
+          if(!this.db.prepare('SELECT 1 FROM sources WHERE path=?').get(path)){
+            try{unlinkSync(path)}catch(error){if(error.code!=='ENOENT')continue}
+          }
+          this.db.prepare('DELETE FROM deleted_session_files WHERE session=? AND path=?').run(row.session,path)
+        }
+        this.db.exec('COMMIT')
+      }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error}
+    }
+    return this.db.prepare('SELECT COUNT(DISTINCT session) AS n FROM deleted_session_files').get().n
+  }
   // Remove one conversation from SuperLcm: records, summaries, settings and SuperLcm's own copies.
   // The host tool's transcript is never touched.
   deleteSession(session) {
     const src = this.source(session)
     if (!src) throw new Error('Unknown session')
     const records = this.stats(session).records
+    const origin=this.db.prepare('SELECT harness,external_id FROM session_origins WHERE session=?').get(session)
+    const dshId=origin?.harness==='dsh'&&typeof origin.external_id==='string'?origin.external_id:null
     const ownCopy = !relative(this.dir, src.path).startsWith('..') && !isAbsolute(relative(this.dir, src.path))
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const deliveries = this.db.prepare('SELECT id FROM deliveries WHERE source_session=? OR target_session=?').all(session, session).map(x => x.id)
       for (const id of deliveries) { this.db.prepare('DELETE FROM delivery_packets WHERE id=?').run(id); this.db.prepare('DELETE FROM deliveries WHERE id=?').run(id) }
-      if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_compaction_chunks'").get())this.db.prepare('DELETE FROM pi_compaction_chunks WHERE session=?').run(session)
-      if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='pi_prepared_compactions'").get())this.db.prepare('DELETE FROM pi_prepared_compactions WHERE session=?').run(session)
-      for(const table of ['pi_rejected_chunks','fork_parent_variants'])if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table))this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
-      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'summary_node_quality', 'claude_node_coverage_v2', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      const exists=table=>!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)
+      if(exists('fork_summary_plans'))this.db.prepare('DELETE FROM fork_summary_plans WHERE run_id IN (SELECT id FROM summary_runs WHERE session=?)').run(session)
+      for(const table of ['pi_compaction_chunks','pi_prepared_compactions','pi_rejected_chunks','fork_parent_variants','fork_summary_receipts',
+        'claude_host_drafts','claude_compaction_rescues','host_summary_claims','summary_runs','summary_errors','compaction_diagnostics','compaction_history','takeover_runs',
+        'dsh_mirrors','dsh_event_digests','dsh_activity','dsh_legacy_sources','dsh_node_sources','dsh_shared_nodes','dsh_record_kinds','dsh_record_revisions','dsh_revision_scan'])
+        if(exists(table))this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      if(dshId!==null){
+        for(const table of ['sl_events','sl_nodes','sl_jobs','sl_recoveries','sl_recovered_events','sl_legacy_sources','sl_node_native','sl_summary_variants','sl_fork_receipts'])
+          if(exists(table))this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(dshId)
+        if(exists('sl_sessions'))this.db.prepare('DELETE FROM sl_sessions WHERE id=?').run(dshId)
+        for(const table of ['lcm_nodes_fts','lcm_edges','lcm_nodes','lcm_index_state','lcm_scan_state','lcm_compaction_drafts','lcm_summary_blocks'])
+          if(exists(table))this.db.prepare(`DELETE FROM ${table} WHERE session_id=?`).run(dshId)
+        // Lifecycle ownership has no summary or original text. Keep it so an
+        // interrupted native commit can still close safely after deletion.
+      }
+      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'summary_node_quality', 'claude_node_coverage_v2', 'claude_node_coverage_v3', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
       this.db.prepare('INSERT INTO deleted_sessions(session,deleted_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET deleted_ms=excluded.deleted_ms').run(session, Date.now())
+      const queue=this.db.prepare('INSERT OR IGNORE INTO deleted_session_files(session,path) VALUES(?,?)')
+      queue.run(session,this.archivePath(session))
+      if(ownCopy)queue.run(session,src.path)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
-    const files = [this.archivePath(session)]
-    // Import and snapshot copies live under the index; remove them unless another conversation still uses them.
-    if (ownCopy && !this.db.prepare('SELECT 1 FROM sources WHERE path=?').get(src.path)) files.push(src.path)
-    for (const file of files) try { unlinkSync(file) } catch {}
-    return { session, deleted: true, records }
+    try{this.cleanupDeletedFiles(session)}catch{}
+    const file_cleanup_pending=!!this.db.prepare('SELECT 1 FROM deleted_session_files WHERE session=?').get(session)
+    return { session, deleted: true, records, ...(file_cleanup_pending?{file_cleanup_pending}:{} ) }
   }
   // Conversations whose last activity is before a cutoff, optionally for one tool.
   staleSessions(beforeMs, harness) {
@@ -806,32 +868,62 @@ export class ClaudeStore {
   }
   eventRows(session) { return this.db.prepare('SELECT ordinal,digest,preview FROM events WHERE session=? ORDER BY ordinal').all(session) }
   eventRowsFrom(session, start) { return this.db.prepare('SELECT ordinal,digest,preview FROM events WHERE session=? AND ordinal>=? ORDER BY ordinal').all(session, start) }
-  nodeRows(session, level) { return this.db.prepare("SELECT n.* FROM nodes n WHERE n.session=? AND n.level=? AND n.id NOT LIKE 'dsh-native-%' ORDER BY n.first").all(session, level).map(n=>({...n,sourceIncomplete:this.nodeSourceIncomplete(session,n)})) }
-  nodeSourceIncomplete(session,node,seen=new Set()) {
-    if(seen.has(node.id))return true
+  nodeRows(session, level) { const cache=new Map();return this.db.prepare("SELECT n.* FROM nodes n WHERE n.session=? AND n.level=? AND n.id NOT LIKE 'dsh-native-%' ORDER BY n.first").all(session, level).map(n=>({...n,sourceIncomplete:this.nodeSourceIncomplete(session,n,new Set(),cache)})) }
+  nodeSourceIncomplete(session,node,seen=new Set(),cache=new Map()) {
+    if(!node||seen.has(node.id))return true
+    if(cache.has(node.id))return cache.get(node.id)
+    seen.add(node.id)
+    const done=value=>{seen.delete(node.id);cache.set(node.id,value);return value}
     const known=this.db.prepare('SELECT complete FROM summary_node_quality WHERE session=? AND id=?').get(session,node.id)
     if(known){
-      if(known.complete!==1)return true
+      if(known.complete!==1||isReducedSummary(node.summary))return done(true)
       const origin=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness
-      return origin==='claude-code'&&!this.db.prepare('SELECT 1 FROM claude_node_coverage_v2 WHERE session=? AND id=?').get(session,node.id)
+      if(origin!=='claude-code')return done(false)
+      if(!this.db.prepare('SELECT 1 FROM claude_node_coverage_v3 WHERE session=? AND id=?').get(session,node.id))return done(true)
+      let ids;try{ids=Array.isArray(node.children)?node.children:JSON.parse(node.children)}catch{return done(true)}
+      if(!Array.isArray(ids)||new Set(ids).size!==ids.length)return done(true)
+      const children=ids.map(id=>this.node(session,id))
+      if(children.some(child=>!child||this.nodeSourceIncomplete(session,child,seen,cache)))return done(true)
+      if(node.id.startsWith('claude-rescue-')){
+        if(!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='claude_compaction_rescues'").get())return done(true)
+        const row=this.db.prepare("SELECT preparation FROM claude_compaction_rescues WHERE session=? AND node_id=? AND state='saved'").get(session,node.id)
+        let proof;try{proof=JSON.parse(row?.preparation)}catch{return done(true)}
+        if(proof?.evidenceVersion!==3||proof.nodeId!==node.id||node.first!==0||proof.through!==node.last||
+          proof.sourceHash!==rescueSourceHash(this,session,node.last)||JSON.stringify(proof.children)!==JSON.stringify(ids)||
+          !Array.isArray(proof.childHashes)||proof.childHashes.length!==children.length||
+          proof.childHashes.some((pair,i)=>!Array.isArray(pair)||pair.length!==2||pair[0]!==ids[i]||pair[1]!==rescueHash(children[i].summary)))return done(true)
+        return done(false)
+      }
+      if(node.level===0)return done(ids.length!==0)
+      return done(!coversSummaryRange(children,node.first,node.last))
     }
     // Legacy summaries did not store which budget or source projection was used.
     // Today's setting cannot prove that an earlier summary saw the full source.
-    return true
+    return done(true)
   }
   node(session, id) { return this.db.prepare('SELECT * FROM nodes WHERE session=? AND id=?').get(session, id) }
   addNode(node, { leaseOwner,validate } = {}) {
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      if(!this.source(node.session)||this.isDeleted(node.session))throw Error('Conversation was deleted; summary not saved')
       if (leaseOwner && !this.ownsLease(node.session, leaseOwner)) throw new Error('Summary writer lost its lease; result not saved')
       if(validate&&!validate())throw Error('Summary setting changed; result not saved')
+      const claude=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(node.session)?.harness==='claude-code'
+      if(claude&&node.level>0&&!node.id.startsWith('claude-rescue-')){
+        const children=Array.isArray(node.children)?node.children.map(id=>this.node(node.session,id)):[]
+        if(children.some(child=>!child)||!coversSummaryRange(children,node.first,node.last))throw Error('Summary children do not cover the declared source range')
+      }
       const inserted=this.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(node.session,node.id,node.level,node.first,node.last,JSON.stringify(node.children),node.summary,node.digest,node.model)
       // A previously saved node may predate source-quality tracking. A later
       // attempt with the same id must not certify the old stored summary.
       if(inserted.changes){
-        this.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET complete=excluded.complete').run(node.session,node.id,node.sourceComplete===false?0:1)
-        if(this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(node.session)?.harness==='claude-code')
-          this.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v2 VALUES(?,?)').run(node.session,node.id)
+        const children=claude&&node.level>0&&!node.id.startsWith('claude-rescue-')?node.children.map(id=>this.node(node.session,id)):[]
+        const rows=claude&&node.level===0?this.db.prepare('SELECT ordinal FROM events WHERE session=? AND ordinal BETWEEN ? AND ? ORDER BY ordinal').all(node.session,node.first,node.last):[]
+        const unrepresented=claude&&node.level===0&&(!Number.isSafeInteger(node.first)||!Number.isSafeInteger(node.last)||node.first<0||node.last<node.first||rows.length!==node.last-node.first+1||rows.some(row=>hasUnrepresentedContent(this.exact(node.session,row.ordinal),this.source(node.session).kind)))
+        const complete=node.sourceComplete!==false&&!unrepresented&&!children.some(child=>this.nodeSourceIncomplete(node.session,child))
+        this.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET complete=excluded.complete').run(node.session,node.id,complete?1:0)
+        if(claude)
+          this.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v3 VALUES(?,?)').run(node.session,node.id)
       }
       if (inserted.changes) this.db.prepare('INSERT INTO node_fts(session,id,summary) VALUES(?,?,?)').run(node.session,node.id,node.summary)
       if(node.sourceRecords) {

@@ -28,6 +28,7 @@ const node=row=>({...row,children:JSON.parse(row.children),sources:JSON.parse(ro
 export class ArchiveDatabase {
   constructor(path) {
     this.db=new DatabaseSync(path);this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
+      CREATE TABLE IF NOT EXISTS deleted_sessions(session TEXT PRIMARY KEY,deleted_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sl_sessions(id TEXT PRIMARY KEY,title TEXT NOT NULL,header TEXT NOT NULL,updatedAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sl_events(session TEXT NOT NULL,seq INTEGER NOT NULL,event TEXT NOT NULL,digest TEXT NOT NULL,text TEXT NOT NULL,tokens INTEGER NOT NULL,original INTEGER NOT NULL,PRIMARY KEY(session,seq));
       CREATE INDEX IF NOT EXISTS sl_events_original ON sl_events(session,original,seq);
@@ -43,6 +44,7 @@ export class ArchiveDatabase {
     const id=sessionId(header.id)
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      if(this.db.prepare('SELECT 1 FROM deleted_sessions WHERE session=?').get('dsh-'+id)){this.db.exec('COMMIT');return {skipped:'deleted'}}
       const prior=this.db.prepare('SELECT header,title,updatedAt FROM sl_sessions WHERE id=?').get(id)
       const identity=JSON.stringify(archiveHeader(prior?JSON.parse(prior.header):null,header))
       if(legacySource)this.verifyLegacyPrefix(id,legacyEvents)
@@ -65,6 +67,7 @@ export class ArchiveDatabase {
     if(recovery.mode!=='physical-order'||!Array.isArray(entries))throw Error('旧会话恢复记录无效')
     this.db.exec('BEGIN IMMEDIATE')
     try{
+      if(this.db.prepare('SELECT 1 FROM deleted_sessions WHERE session=?').get('dsh-'+id)){this.db.exec('COMMIT');return {skipped:'deleted'}}
       const prior=this.db.prepare('SELECT header,title,updatedAt FROM sl_sessions WHERE id=?').get(id)
       const identity=JSON.stringify(archiveHeader(prior?JSON.parse(prior.header):null,header))
       this.verifyLegacyPrefix(id,entries.map(x=>x.event))
@@ -118,7 +121,7 @@ export class ArchiveDatabase {
     ) WHERE ${session?'session=? AND ':''}instr(lower(text),lower(?))>0 ORDER BY session,seq LIMIT ? OFFSET ?`).all(...args)
     return {items:rows.slice(0,count),next:rows.length>count?from+count:null}}
 
-  lease(id,revision){const owner=randomUUID(),now=Date.now();const row=this.db.prepare(`INSERT INTO sl_jobs(session,owner,revision,expires) VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET owner=excluded.owner,revision=excluded.revision,expires=excluded.expires WHERE sl_jobs.expires<? AND sl_jobs.retry<=? RETURNING owner`).get(sessionId(id),owner,revision,now+45000,now,now);return row?.owner===owner?owner:null}
+  lease(id,revision){const owner=randomUUID(),now=Date.now(),key=sessionId(id);const row=this.db.prepare(`INSERT INTO sl_jobs(session,owner,revision,expires) SELECT ?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM deleted_sessions WHERE session=?) ON CONFLICT(session) DO UPDATE SET owner=excluded.owner,revision=excluded.revision,expires=excluded.expires WHERE sl_jobs.expires<? AND sl_jobs.retry<=? RETURNING owner`).get(key,owner,revision,now+45000,'dsh-'+key,now,now);return row?.owner===owner?owner:null}
   renew(id,owner){return this.db.prepare('UPDATE sl_jobs SET expires=? WHERE session=? AND owner=?').run(Date.now()+45000,id,owner).changes===1}
   release(id,owner,failed=false){this.db.prepare('UPDATE sl_jobs SET expires=0,retry=? WHERE session=? AND owner=?').run(failed?Date.now()+60000:0,id,owner)}
   saveNode(id,work,summary,owner,revision,currentRevision){this.db.exec('BEGIN IMMEDIATE');try{const job=this.db.prepare('SELECT * FROM sl_jobs WHERE session=?').get(id);if(job?.owner!==owner||job.expires<Date.now()||job.revision!==revision||currentRevision()!==revision)throw Error('摘要设置或任务已变化')

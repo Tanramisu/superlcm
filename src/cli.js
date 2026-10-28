@@ -155,7 +155,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           const file=input.transcript_path && existsSync(input.transcript_path) ? (codex ? codexTranscript(input.transcript_path,{cwd:input.cwd}) : claudeTranscript(input.transcript_path)) : null
           const shouldIndex=['Stop','PostCompact','SessionEnd','SessionStart','UserPromptSubmit'].includes(event)
           // A conversation the user deleted in SuperLcm is not captured again automatically.
-          if (shouldIndex && file && !store.isDeleted(session)) result=store.ingest(session,file)
+          if (shouldIndex && file && !store.isDeleted(session)) result=store.ingest(session,file,'jsonl',{automatic:true})
           if (store.source(session)) {
             store.markClient(codex?'codex':'claude-code','hook')
             const title=nativeConversationName(store,{harness:codex?'codex':'claude-code',id:input.session_id,file:file||store.source(session).path})
@@ -251,7 +251,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
     if(!setting.enabled)reply={use:false,reason:'compaction takeover is off'}
     else if(!src||store.isDeleted(session))reply={use:false,reason:'conversation not recorded by SuperLcm'}
     else {
-      if(existsSync(src.path))store.ingest(session,src.path) // the newest turns, written since the last hook
+      if(existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)throw Error('conversation deleted during capture') // newest turns
       const {planCompaction}=await import('./compaction.js')
       const {verifiedCompactionInput}=await import('./claude-compaction-input.js')
       const {verifiedActiveMessages,verifiedCompactionCut}=await import('./claude-rescue-source.js')
@@ -357,7 +357,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       }else if(command==='summary-claim'){
         store.recoverSummaryRuns()
         store.setHostWriter(session,true)
-        if(existsSync(src.path))store.ingest(session,src.path)
+        if(existsSync(src.path)&&store.ingest(session,src.path,'jsonl',{automatic:true}).skipped)throw Error('conversation deleted during capture')
         const leafOnly=rest.includes('--leaf'),deadlineAt=rest.indexOf('--deadline'),deadline=deadlineAt<0?0:Number(rest[deadlineAt+1])
         if(!Number.isSafeInteger(deadline)||deadline<0||(deadline&&deadline<=Date.now()))throw Object.assign(Error('Catch-up deadline reached'),{none:true})
         const work=summaryWork(store,session,{leafOnly}),revision=summarySettingsRevision(store,session)
