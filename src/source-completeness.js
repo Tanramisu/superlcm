@@ -4,6 +4,7 @@ const opaque=new Set(['image','image_url','input_image','file','input_file','doc
 const text=new Set(['text','input_text','output_text'])
 const calls=new Set(['tool_use','toolCall','tool-call','function_call','custom_tool_call'])
 const privateReasoning=new Set(['thinking','redacted_thinking'])
+const recordTypes=new Set(['user','assistant','tool','toolResult','system','response_item','event_msg','session_meta','turn_context','progress','file-history-snapshot','queue-operation','custom-title','ai-title','summary','last-prompt','pr-link','metadata'])
 function contentIncomplete(value){
   if(value==null)return false
   if(typeof value==='string'){
@@ -37,8 +38,15 @@ function visit(value){
   if(calls.has(value.type))return false
   return Object.entries(value).some(([key,child])=>key==='content'?contentIncomplete(child):visit(child))
 }
-export function hasUnrepresentedContent(raw,kind='jsonl'){
+export function hasUnrepresentedContent(raw,kind='jsonl',{strictRecords=false}={}){
   if(kind==='text')return false
   let value;try{value=JSON.parse(raw)}catch{return true}
-  return !value||typeof value!=='object'||Array.isArray(value)||visit(value)
+  if(!value||typeof value!=='object'||Array.isArray(value))return true
+  if(strictRecords&&!value.dsh_session&&typeof value.type==='string'&&!recordTypes.has(value.type)&&!/^api-request(?:-|$)/.test(value.type)){
+    // An empty attachment marker carries no content. Any unknown payload may
+    // contain information that the textual projection does not represent.
+    if(value.type!=='attachment'||Object.keys(value).some(key=>!['type','uuid','parentUuid','timestamp','sessionId','version'].includes(key)))return true
+  }
+  if(strictRecords&&value.type==='system'&&(value.content!=null||value.message?.content!=null))return true
+  return visit(value)
 }

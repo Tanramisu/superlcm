@@ -230,7 +230,10 @@ try {
     const branch=branchPayloads[0], main=mainPayloads[0]
     writeFileSync(join(dir,'wire-fixtures.json'),JSON.stringify({branch,main}))
     assert.deepEqual(branch.messages.slice(0,-1),main.messages)
-    assert.deepEqual({...branch,messages:[],model:undefined},{...main,messages:[],model:undefined})
+    if(otherModel){
+      assert.deepEqual({...branch,messages:[],model:undefined,max_tokens:undefined,max_completion_tokens:undefined},{...main,messages:[],model:undefined,max_tokens:undefined,max_completion_tokens:undefined})
+      assert.equal(piOutputReserve(branch),1024,'the selected summary model keeps its own output limit')
+    }else assert.deepEqual({...branch,messages:[],model:undefined},{...main,messages:[],model:undefined})
     assert.equal(branch.model,otherModel?'scripted-summary':'scripted-main');assert.equal(main.model,'scripted-main')
     assert.equal(swapEntry.details.providerUsage.cacheRead,256)
     if(overGoal){

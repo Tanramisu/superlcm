@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto'
 import {DatabaseSync} from 'node:sqlite'
 import {ClaudeStore,nodeId} from '../src/store.js'
 import {summaryWork} from '../src/summarize.js'
-import {planMainFork,saveForkTree} from '../src/main-fork.js'
+import {planMainFork} from '../src/main-fork.js'
 import {coveredThrough,frontier} from '../src/compaction.js'
 import {claudeCompactionNodes} from '../src/claude-checkpoints.js'
 import {liveMessage} from '../src/claude-live-messages.js'
@@ -170,8 +170,7 @@ test('Claude main fork stops at opaque source and plans verified recovery after 
  const h=fixture({rows}),s=h.open();t.after(()=>s.close())
  const plan=planMainFork(s,h.id,{keepTokens:0,force:true,env:{}})
  assert.ok(plan);assert.equal(plan.originals.at(-1).ordinal,1)
- const tree=plan.tree.map(n=>({...n,summary:'# First task\nFirst request answered.'}))
- saveForkTree(s,h.id,plan,tree,{model:'fixture'})
+ s.addNode({session:h.id,id:'verified-first',level:0,first:0,last:1,children:[],summary:'# First task\nFirst request answered.',digest:plan.digest,model:'fixture',sourceComplete:true})
  assert.equal(planMainFork(s,h.id,{keepTokens:0,force:true,env:{}}),null)
  const h2=fixture({rows:rows.map((r,i)=>i===2?{type:'user',message:{content:'ordinary'}}:r)}),s2=h2.open();t.after(()=>s2.close())
  s2.markCompaction(h2.id,3)

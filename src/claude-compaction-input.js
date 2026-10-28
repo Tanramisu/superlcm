@@ -58,12 +58,12 @@ export function verifiedCompactionInput(store, session, messages) {
       const text=textOf(record),origin=record.origin?.kind??(record.promptSource==='system'?'system':null)
       if(isRequestCopy(record)||(record?.type!=='user'&&record?.role!=='user')||record.isMeta||record.isCompactSummary||
         ['system','task-notification'].includes(origin)||Array.isArray(content)&&content.some(b=>b?.type==='tool_result')||
-        !text.trim()||hasUnrepresentedContent(raw))return null
+        !text.trim()||hasUnrepresentedContent(raw,'jsonl',{strictRecords:true}))return null
       return {ordinal:event.ordinal,text}
     }})
     if(event.ordinal>through)Object.defineProperties(event,{
       exactRaw:{get:()=>store.exact(session,event.ordinal)},
-      sourceHasNonText:{get:()=>hasUnrepresentedContent(store.exact(session,event.ordinal))}
+      sourceHasNonText:{get:()=>hasUnrepresentedContent(store.exact(session,event.ordinal),'jsonl',{strictRecords:true})}
     })
     return event
   })

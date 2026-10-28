@@ -89,6 +89,7 @@ export class ClaudeStore {
       CREATE TABLE IF NOT EXISTS summary_node_quality(session TEXT,id TEXT,complete INTEGER NOT NULL,PRIMARY KEY(session,id));
       CREATE TABLE IF NOT EXISTS claude_node_coverage_v2(session TEXT,id TEXT,PRIMARY KEY(session,id));
       CREATE TABLE IF NOT EXISTS claude_node_coverage_v3(session TEXT,id TEXT,PRIMARY KEY(session,id));
+      CREATE TABLE IF NOT EXISTS claude_node_coverage_v4(session TEXT,id TEXT,PRIMARY KEY(session,id));
       CREATE TABLE IF NOT EXISTS credential_bindings(scope TEXT PRIMARY KEY,revision TEXT);
       CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(session UNINDEXED, id UNINDEXED, summary);
       CREATE TABLE IF NOT EXISTS leases(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
@@ -107,6 +108,7 @@ export class ClaudeStore {
       CREATE TABLE IF NOT EXISTS integrations(harness TEXT PRIMARY KEY,enabled INTEGER NOT NULL,revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS deleted_sessions(session TEXT PRIMARY KEY, deleted_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS deleted_session_files(session TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(session,path));
+      CREATE TABLE IF NOT EXISTS import_staging(token TEXT PRIMARY KEY,session TEXT NOT NULL,path TEXT NOT NULL,pid INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS compactions(session TEXT NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(session,ordinal));
       CREATE TABLE IF NOT EXISTS takeover_settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL, window INTEGER NOT NULL, previous TEXT);
       CREATE TABLE IF NOT EXISTS takeover_copies(session TEXT PRIMARY KEY, remaining INTEGER NOT NULL);
@@ -166,7 +168,7 @@ export class ClaudeStore {
     migrateSummaryModes(this.db)
     this.backfillHeadless()
     retryApiCredentialCleanup(this.db,this.dir)
-    try{this.cleanupDeletedFiles()}catch{}
+    try{this.recoverAbandonedImports();this.cleanupDeletedFiles()}catch{}
   }
   close() { this.db.close() }
   classifyHeadless(session) {
@@ -724,6 +726,20 @@ export class ClaudeStore {
   // The copy is exactly source bytes [0, offset), so event offsets address it unchanged.
   // Deleted conversations stay deleted: automatic capture (hooks) checks this before indexing again.
   isDeleted(session) { return Boolean(this.db.prepare('SELECT 1 FROM deleted_sessions WHERE session=?').get(session)) }
+  recoverAbandonedImports() {
+    this.db.exec('BEGIN IMMEDIATE')
+    try{
+      for(const stage of this.db.prepare('SELECT * FROM import_staging').all()){
+        let alive=true
+        try{process.kill(stage.pid,0)}catch(error){if(error.code==='ESRCH')alive=false}
+        if(alive)continue
+        const queue=this.db.prepare('INSERT OR IGNORE INTO deleted_session_files(session,path) VALUES(?,?)')
+        queue.run(stage.session,stage.path);queue.run(stage.session,this.archivePath(stage.session))
+        this.db.prepare('DELETE FROM import_staging WHERE token=?').run(stage.token)
+      }
+      this.db.exec('COMMIT')
+    }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error}
+  }
   cleanupDeletedFiles(session=null) {
     const sessions=session?[{session}]:this.db.prepare('SELECT DISTINCT session FROM deleted_session_files').all()
     for(const row of sessions){
@@ -739,6 +755,12 @@ export class ClaudeStore {
           try{canonical=join(realpathSync(dirname(path)),basename(path))}
           catch(error){if(error.code==='ENOENT'){this.db.prepare('DELETE FROM deleted_session_files WHERE session=? AND path=?').run(row.session,path)}continue}
           if(canonical===this.realDir||!inside(this.realDir,canonical))continue
+          const staging=this.db.prepare('SELECT session,path FROM import_staging').all().some(stage=>{
+            let staged;try{staged=join(realpathSync(dirname(stage.path)),basename(stage.path))}catch{staged=resolve(stage.path)}
+            let stagedArchive;try{const p=this.archivePath(stage.session);stagedArchive=join(realpathSync(dirname(p)),basename(p))}catch{}
+            return canonical===staged||canonical===stagedArchive
+          })
+          if(staging)continue
           // Older databases can contain an alias with a symlinked ancestor.
           // Treat it as a live reference before deleting the canonical path.
           const referenced=this.db.prepare('SELECT path FROM sources').all().some(source=>{
@@ -787,7 +809,7 @@ export class ClaudeStore {
         // Lifecycle ownership has no summary or original text. Keep it so an
         // interrupted native commit can still close safely after deletion.
       }
-      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'summary_node_quality', 'claude_node_coverage_v2', 'claude_node_coverage_v3', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      for (const table of ['event_fts', 'events', 'session_event_counts', 'node_fts', 'nodes', 'summary_node_quality', 'claude_node_coverage_v2', 'claude_node_coverage_v3', 'claude_node_coverage_v4', 'leases', 'summary_retries', 'summary_flush', 'compactions', 'takeover_copies', 'host_writers', 'summary_policies', 'summary_preferences', 'session_origins', 'sources']) this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
       this.db.prepare('INSERT INTO deleted_sessions(session,deleted_ms) VALUES(?,?) ON CONFLICT(session) DO UPDATE SET deleted_ms=excluded.deleted_ms').run(session, Date.now())
       const queue=this.db.prepare('INSERT OR IGNORE INTO deleted_session_files(session,path) VALUES(?,?)')
       queue.run(session,this.archivePath(session))
@@ -926,6 +948,7 @@ export class ClaudeStore {
       const origin=this.db.prepare('SELECT harness FROM session_origins WHERE session=?').get(session)?.harness
       if(origin!=='claude-code')return done(false)
       if(!this.db.prepare('SELECT 1 FROM claude_node_coverage_v3 WHERE session=? AND id=?').get(session,node.id))return done(true)
+      if(!this.db.prepare('SELECT 1 FROM claude_node_coverage_v4 WHERE session=? AND id=?').get(session,node.id))return done(true)
       let ids;try{ids=Array.isArray(node.children)?node.children:JSON.parse(node.children)}catch{return done(true)}
       if(!Array.isArray(ids)||new Set(ids).size!==ids.length)return done(true)
       const children=ids.map(id=>this.node(session,id))
@@ -965,11 +988,13 @@ export class ClaudeStore {
       if(inserted.changes){
         const children=claude&&node.level>0&&!node.id.startsWith('claude-rescue-')?node.children.map(id=>this.node(node.session,id)):[]
         const rows=claude&&node.level===0?this.db.prepare('SELECT ordinal FROM events WHERE session=? AND ordinal BETWEEN ? AND ? ORDER BY ordinal').all(node.session,node.first,node.last):[]
-        const unrepresented=claude&&node.level===0&&(!Number.isSafeInteger(node.first)||!Number.isSafeInteger(node.last)||node.first<0||node.last<node.first||rows.length!==node.last-node.first+1||rows.some(row=>hasUnrepresentedContent(this.exact(node.session,row.ordinal),this.source(node.session).kind)))
+        const unrepresented=claude&&node.level===0&&(!Number.isSafeInteger(node.first)||!Number.isSafeInteger(node.last)||node.first<0||node.last<node.first||rows.length!==node.last-node.first+1||rows.some(row=>hasUnrepresentedContent(this.exact(node.session,row.ordinal),this.source(node.session).kind,{strictRecords:true})))
         const complete=node.sourceComplete!==false&&!unrepresented&&!children.some(child=>this.nodeSourceIncomplete(node.session,child))
         this.db.prepare('INSERT INTO summary_node_quality VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET complete=excluded.complete').run(node.session,node.id,complete?1:0)
         if(claude)
           this.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v3 VALUES(?,?)').run(node.session,node.id)
+        if(claude)
+          this.db.prepare('INSERT OR IGNORE INTO claude_node_coverage_v4 VALUES(?,?)').run(node.session,node.id)
       }
       if (inserted.changes) this.db.prepare('INSERT INTO node_fts(session,id,summary) VALUES(?,?,?)').run(node.session,node.id,node.summary)
       if(node.sourceRecords) {
@@ -1084,14 +1109,30 @@ export function importFile(store, path, label, origin = 'import', name) {
     }
     if (!visibleCount) throw new Error('No visible user/assistant messages in JSONL; export {role,content} records or a UTF-8 .txt file')
   }
-  const folder = join(store.dir,'imports'); ensurePrivate(folder)
+  const folder = join(store.realDir,'imports'); ensurePrivate(folder)
   const dest = join(folder,`${digest}.${isJsonl?'jsonl':'txt'}`)
-  if (!existsSync(dest)) writeFileSync(dest,raw,{flag:'wx',mode:0o600})
-  else if (hash(readFileSync(dest)) !== digest) throw new Error('Existing imported original was modified; refusing to reuse it')
   const session = label || `import-${digest.slice(0,16)}`
-  const result=store.ingest(session,dest,isJsonl?'jsonl':'text')
-  store.setMetadata(session,{harness:origin,externalId:session,name:name||derivedName(store.eventRows(session).find(e=>e.preview.startsWith('user:'))?.preview),nameSource:name?'manual':'derived'})
-  return result
+  const token=randomBytes(16).toString('hex')
+  store.db.prepare('INSERT INTO import_staging VALUES(?,?,?,?)').run(token,session,dest,process.pid)
+  try{
+    store.db.exec('BEGIN IMMEDIATE')
+    if (!existsSync(dest)) writeFileSync(dest,raw,{flag:'wx',mode:0o600})
+    else if (hash(readFileSync(dest)) !== digest) throw new Error('Existing imported original was modified; refusing to reuse it')
+    const result=store.ingest(session,dest,isJsonl?'jsonl':'text',{inTransaction:true})
+    store.setMetadata(session,{harness:origin,externalId:session,name:name||derivedName(store.eventRows(session).find(e=>e.preview.startsWith('user:'))?.preview),nameSource:name?'manual':'derived'})
+    store.db.prepare('DELETE FROM import_staging WHERE token=?').run(token)
+    store.db.exec('COMMIT');return result
+  }catch(error){
+    if(store.db.isTransaction)try{store.db.exec('ROLLBACK')}catch{}
+    try{
+      store.db.exec('BEGIN IMMEDIATE')
+      const queue=store.db.prepare('INSERT OR IGNORE INTO deleted_session_files(session,path) VALUES(?,?)')
+      queue.run(session,dest);queue.run(session,store.archivePath(session))
+      store.db.prepare('DELETE FROM import_staging WHERE token=?').run(token)
+      store.db.exec('COMMIT');store.cleanupDeletedFiles(session)
+    }catch{if(store.db.isTransaction)try{store.db.exec('ROLLBACK')}catch{}}
+    throw error
+  }
 }
 export const nodeId = (session, level, first, last, digest) => `s${level}-${hash(`${session}:${level}:${first}:${last}:${digest}`).slice(0,24)}`
 

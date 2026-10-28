@@ -25,7 +25,7 @@ function archivedMessages(store,session) {
     const pairing=summaryToolPairing(raw)
     const blocks=Array.isArray(content)?content:[],toolBodies=bodies({toolUses:blocks.filter(b=>b.type==='tool_use'),toolResults:blocks.filter(b=>b.type==='tool_result')})
     const message={role,text,toolUses:pairing.opened,toolResultIds:pairing.closed}
-    return [{ordinal:e.ordinal,digest:e.digest,key:messageKey(message),native:record.isCompactSummary===true,nonText:hasUnrepresentedContent(raw),
+    return [{ordinal:e.ordinal,digest:e.digest,key:messageKey(message),native:record.isCompactSummary===true,nonText:hasUnrepresentedContent(raw,'jsonl',{strictRecords:true}),
       endsTurn:pairing.endsTurn===true,
       toolBodies:toolBodies.map(body=>Object.fromEntries(Object.entries(body).map(([name,value])=>[name,rescueHash(canonical(value))])))}]
   })
@@ -113,7 +113,7 @@ export function prepareRescueSource(store,session,input) {
     // new SuperLcm rescue saw every older original that it would claim to cover.
     for(const event of store.eventRows(session).filter(e=>e.ordinal>=from&&e.ordinal<opening.ordinal)){
       const raw=store.exact(session,event.ordinal)
-      if(hasUnrepresentedContent(raw)||summarySource(raw))return null
+      if(hasUnrepresentedContent(raw,'jsonl',{strictRecords:true})||summarySource(raw))return null
     }
     const original=JSON.parse(store.exact(session,opening.ordinal)),blocks=original.message?.content??original.content
     const native=typeof blocks==='string'?blocks:blocks.filter(b=>b.type==='text').map(b=>b.text||'').join('\n')
@@ -124,7 +124,7 @@ export function prepareRescueSource(store,session,input) {
     const raw=store.exact(session,e.ordinal)
     // Text projection does not include images, files or audio. A rescue cannot
     // claim to cover those records unless an earlier complete node already did.
-    if(hasUnrepresentedContent(raw))return null
+    if(hasUnrepresentedContent(raw,'jsonl',{strictRecords:true}))return null
     if(request?.ordinal===e.ordinal)continue // carried verbatim, never rewritten
     const source=summarySource(raw)
     if(source)content+=`\n[record ${e.ordinal}]\n${source}`
