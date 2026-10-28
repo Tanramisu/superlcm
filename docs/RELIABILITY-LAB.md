@@ -7,7 +7,7 @@ npm run test:reliability
 npm run verify:release
 ```
 
-须先安装项目开发依赖或提供已安装的 DSH 宿主。测试加载器优先使用仓库的宿主依赖；可通过 `SUPERLCM_DSH_RUNTIME` 指定宿主的 `package.json`。产品不依赖测试机器的固定路径。
+须先安装项目开发依赖或提供已安装的 DSH 宿主。测试加载器优先使用当前 DSH 命令对应的宿主依赖；可通过 `SUPERLCM_DSH_RUNTIME` 指定另一套宿主的 `package.json`。产品不依赖测试机器的固定路径。
 
 测试使用临时目录、真实已安装 DSH SDK 和离线模型响应，不改真实对话、生产配置或模型，不调用付费接口。GitHub Actions 保持关闭。
 
