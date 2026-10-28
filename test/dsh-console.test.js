@@ -63,12 +63,15 @@ test('live retry jobs remain visible during large archive scans and terminal sta
     engine.report('waiting-session','summarizing',{attempt:9,failures:8})
     job=compressionSnapshot(store,{now,alive:()=>true}).jobs[0]
     assert.equal(job.attempt,9);assert.equal(job.retry_at,null);assert.equal(job.error_kind,null)
+    assert.deepEqual({...job.last_failure},{attempt:8,error_kind:'timeout',at_ms:100000},'the previous failure remains visible during the next attempt')
     engine.report('waiting-session','retrying',{attempt:9,failures:9,retryAt:300000,errorKind:'quota'})
     engine.report('waiting-session','cancelled')
     job=compressionSnapshot(store,{now,alive:()=>true}).jobs.find(j=>j.session==='waiting-session')
     assert.equal(job.phase,'cancelled');assert.equal(job.retry_at,null)
     engine.report('waiting-session','summarizing')
-    assert.equal(compressionSnapshot(store,{now,alive:()=>true}).jobs[0].attempt,undefined,'a new legacy job must not inherit retry diagnostics')
+    const fresh=compressionSnapshot(store,{now,alive:()=>true}).jobs[0]
+    assert.equal(fresh.attempt,undefined,'a new legacy job must not inherit retry diagnostics')
+    assert.equal(fresh.last_failure,undefined)
     engine.report('waiting-session','cancelled')
     engine.close();now++;archive.report('newer-scan','synced')
     assert.equal(compressionSnapshot(store,{now,alive:()=>true}).jobs[0].session,'newer-scan')

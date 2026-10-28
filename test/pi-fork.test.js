@@ -11,6 +11,53 @@ const messages=[{role:'system',content:'System',toolsAdded:[{name:'read',paramet
 const payload={model:'fixture',messages:[{role:'system',content:'System'},{role:'user',content:first.content},{role:'assistant',content:'Inspection pending.'}],tools:[{type:'function',function:{name:'read'}}],max_tokens:2048,prompt_cache_key:'main-session',temperature:.2}
 const snapshot={session_id:'main-session',sourceMessages:[first,second],source:'source',tokensBefore:10000}
 const capture={payload,messages,model:{provider:'fixture',id:'fixture',contextWindow:1000000,maxTokens:2048},reasoning:'high'}
+test('Pi branch keeps all nested timers alive only for meaningful stream output',async t=>{
+ const gates=[];let started,progress=0
+ const begun=new Promise(resolve=>started=resolve)
+ const response={stopReason:'stop',content:[{type:'text',text:JSON.stringify({blocks:[{index:0,summary:'# State\nInspection remains pending.'}]})}]}
+ const ctx={model:capture.model,modelRegistry:{streamSimple(_m,_c,options){
+  options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:'directive'}]})
+  return {async *[Symbol.asyncIterator](){
+   started()
+   for(let i=0;i<3;i++){await new Promise(resolve=>gates.push(resolve));yield {type:'thinking_delta',delta:'continued reasoning'}}
+  },result:async()=>response}
+ }}}
+ const until=async check=>{for(let i=0;i<100;i++){if(check())return;await new Promise(setImmediate)}throw Error('Pi stream did not advance')}
+ let work
+ try{
+  t.mock.timers.enable({apis:['setTimeout','Date']})
+  work=summarizePiFork(ctx,snapshot,capture,{stage:async()=>{},timeoutMs:600000,progress:()=>progress++})
+  await begun;await until(()=>gates.length===1)
+  for(let i=0;i<3;i++){
+   t.mock.timers.tick(540000);gates.shift()();await until(()=>progress===i+1)
+   if(i<2)await until(()=>gates.length===1)
+  }
+  const result=await work
+  assert.equal(progress,3);assert.ok(result.blocks[0].summary.includes('Inspection remains pending'))
+ }finally{for(const release of gates)release();t.mock.timers.reset();await work}
+})
+
+test('Pi empty deltas do not delay the idle timeout',async t=>{
+ let started,release,emitted=false,progress=0
+ const begun=new Promise(resolve=>started=resolve)
+ const ctx={model:capture.model,modelRegistry:{streamSimple(_m,_c,options){
+  options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:'directive'}]})
+  return {async *[Symbol.asyncIterator](){
+   started();await new Promise(resolve=>release=resolve)
+   yield {type:'thinking_delta',delta:'   '};emitted=true;await new Promise(()=>{})
+  },result:async()=>{throw Error('incomplete stream cannot complete')}}
+ }}}
+ const until=async check=>{for(let i=0;i<100;i++){if(check())return;await new Promise(setImmediate)}throw Error('Pi stream did not advance')}
+ let work
+ try{
+  t.mock.timers.enable({apis:['setTimeout','Date']})
+  work=summarizePiFork(ctx,snapshot,capture,{stage:async()=>{},timeoutMs:600000,progress:()=>progress++})
+  const rejected=assert.rejects(work,/timed out/)
+  await begun;t.mock.timers.tick(540000);release();await until(()=>emitted)
+  t.mock.timers.tick(60001);await rejected;assert.equal(progress,0)
+ }finally{release?.();t.mock.timers.reset()}
+})
+
 for(const excess of [.01,.07])test('Pi accepts a complete tree '+Math.round(excess*100)+'% above its planning goal within the sent output limit',async()=>{
  let goal,actual,output
  const ctx={model:capture.model,modelRegistry:{streamSimple(_m,_c,options){

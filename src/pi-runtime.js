@@ -51,6 +51,15 @@ export function registerPiCompaction(pi, options, {
   const capacityWaiters=new Set()
   const settings = () => ({...(pi.getSettings?.() || {}), thinkingLevel:pi.getThinkingLevel?.()})
   const entries = ctx => ctx.sessionManager.buildSessionProjection().entries
+  const takeoverEnabled=ctx=>{
+    const p=policy()
+    if(!p.enabled)return false
+    if(p.summaryMode==='api'&&entries(ctx).some(e=>e.messages.some(m=>Array.isArray(m.content)&&m.content.some(b=>!['text','toolCall','thinking','redactedThinking'].includes(b.type))))){
+      ctx.ui?.setStatus?.('superlcm-compaction','SuperLCM：图片或附件由原生压缩处理')
+      return false
+    }
+    return true
+  }
   const signature = ctx => piSignature(ctx, policy(), settings())
   const status = (ctx, text) => ctx.ui?.setStatus?.('superlcm-compaction', text)
   const notice = (ctx, text) => ctx.ui?.notify?.(text, 'warning')
@@ -74,7 +83,7 @@ export function registerPiCompaction(pi, options, {
   }
   const valid = (ctx, current = entries(ctx)) => state && snapshotMatches(state.snapshot, current, signature(ctx))
   const usage = ctx => ({ tokens: ctx.getContextUsage()?.tokens, window: ctx.model?.contextWindow })
-  const reached = (ctx, ratio) => { const u = usage(ctx); return Number.isFinite(u.tokens) && Number.isFinite(u.window) && u.window > 0 && u.tokens >= u.window * ratio }
+  const reached = (ctx, ratio) => { const u = usage(ctx),tokens=Math.max(u.tokens||0,capacity(ctx)?.estimated||0); return Number.isFinite(u.window) && u.window > 0 && tokens >= u.window * ratio }
   function capacity(ctx, current = entries(ctx)) {
     const u = usage(ctx)
     if (!Number.isFinite(u.window) || u.window <= 0) return null
@@ -113,14 +122,14 @@ export function registerPiCompaction(pi, options, {
       let selectedCapture=capture
       const current = { snapshot, controller: new AbortController(), ready: null, promise: null,attempt:0 }
       state = current; status(ctx, p.summaryMode === 'main-fork' ? 'SuperLCM：主模型后台分支摘要' : 'SuperLCM：Luna 后台准备摘要')
-      const work = async signal => {
+      const work = async (signal,progress) => {
         if (p.summaryMode !== 'main-fork') return request({ ...options, command: 'pi-prepare' }, snapshot, signal)
         const restored = current.ignorePrepared?null:await request({ ...options, command: 'pi-ready' }, {session_id:snapshot.session_id,draftKey:snapshot.draftKey}, signal)
         if (restored?.compaction) return restored
         if(!selectedCapture)selectedCapture=capture
         if(!selectedCapture||['id','provider','contextWindow','maxTokens','api','baseUrl'].some(key=>selectedCapture.model?.[key]!==ctx.model?.[key])||selectedCapture.reasoning!==settings().thinkingLevel)throw Object.assign(Error('Pi 等待捕获当前模型请求后恢复后台摘要'),{code:'SUPERLCM_PI_CAPTURE_INVALID'})
         let staged
-        const forkSummary = await fork(ctx, snapshot, selectedCapture, { signal,
+        const forkSummary = await fork(ctx, snapshot, selectedCapture, { signal, progress,
           stage: async () => { staged = await request({ ...options, command: 'pi-stage' }, snapshot, signal) } })
         signal.throwIfAborted()
         if (state !== current || !valid(ctx)) throw Error('Pi 后台分支已过期')
@@ -136,7 +145,7 @@ export function registerPiCompaction(pi, options, {
           try{
             result=await summaryAttempt(work,current.controller.signal,attemptTimeoutMs)
             if(!result?.compaction)throw Error('Pi 后台摘要未返回完整结果，原文保留')
-            if(p.summaryMode==='main-fork'){
+            {
               checkedSummary(result.compaction.summary,{requireHeading:true,maxChars:null})
               if(result.compaction.firstKeptEntryId!==snapshot.firstKeptEntryId||estimateSummaryTokens(result.compaction.summary)>=(snapshot.sourceTokens??estimateSummaryTokens(snapshot.source)))throw Error('Pi 后台摘要覆盖或长度无效，原文保留')
             }
@@ -161,8 +170,8 @@ export function registerPiCompaction(pi, options, {
         if (state !== current) return
         if (!valid(ctx)) { stop(); return }
         if (!result?.compaction) throw Error('Pi 后台摘要未返回完整结果，原文保留')
-        current.ready = result; clearRetries(); status(ctx, policy().enabled ? `SuperLCM：摘要已准备，${Math.round(policy().ratio*100)}% 时替换` : 'SuperLCM：后台摘要已保存')
-        if (!capacityWaiters.size&&policy().enabled&&ctx.isIdle() && (reached(ctx, policy().ratio) || danger(ctx))) void swapIdle(ctx)
+        current.ready = result; clearRetries(); status(ctx, takeoverEnabled(ctx) ? `SuperLCM：摘要已准备，${Math.round(policy().ratio*100)}% 时替换` : 'SuperLCM：后台摘要已保存')
+        if (!capacityWaiters.size&&takeoverEnabled(ctx)&&ctx.isIdle() && (reached(ctx, policy().ratio) || danger(ctx))) void swapIdle(ctx)
       }).catch(error => {
         if (state !== current) return
         state = null
@@ -177,7 +186,7 @@ export function registerPiCompaction(pi, options, {
     } catch (error) { stop(); notice(ctx, error.message) }
   }
   async function ready(ctx, current = entries(ctx), signal, extra = 0) {
-    if (!policy().enabled || !state?.ready || !valid(ctx, current)) return null
+    if (!takeoverEnabled(ctx) || !state?.ready || !valid(ctx, current)) return null
     const selected = state
     // This command only reads a completed result and validates model settings.
     // Cache misses never generate a summary here.
@@ -228,7 +237,7 @@ export function registerPiCompaction(pi, options, {
     finally{capacityWaiters.delete(waiter)}
   }
   async function swapIdle(ctx, force = false) {
-    if (!policy().enabled || swapping || !ctx.isIdle() || !state?.ready || (!force && !reached(ctx, policy().ratio) && !danger(ctx))) return false
+    if (!takeoverEnabled(ctx) || swapping || !ctx.isIdle() || !state?.ready || (!force && !reached(ctx, policy().ratio) && !danger(ctx))) return false
     const selectedEpoch = epoch, selectedState = state, token = {}; swapping = token
     try {
       await summaryAttempt(signal => abortable(new Promise((resolve, reject) => {
@@ -245,7 +254,7 @@ export function registerPiCompaction(pi, options, {
   pi.on('session_before_compact', async (event, ctx) => {
     const selectedEpoch = epoch
     try {
-      if (!policy().enabled) return
+      if (!takeoverEnabled(ctx)) return
       if(event.reason==='threshold'&&!reached(ctx,policy().ratio)&&!danger(ctx))return {cancel:true}
       const compaction = await ready(ctx, entries(ctx), event.signal)
       if (epoch !== selectedEpoch) return { cancel: true }
@@ -260,7 +269,7 @@ export function registerPiCompaction(pi, options, {
     // capturing it. Its aborted turn must not cancel the recovery branch.
     if(ctx.signal?.aborted)return
     try {
-      if (policy().enabled && event.context?.contextEntries && reached(ctx, policy().ratio)) {
+      if (takeoverEnabled(ctx) && event.context?.contextEntries && reached(ctx, policy().ratio)) {
         let compaction = await ready(ctx, event.context.contextEntries)
         if (epoch !== selectedEpoch) return
         if (!compaction && danger(ctx, event.context.contextEntries)) {
@@ -274,7 +283,7 @@ export function registerPiCompaction(pi, options, {
             firstKeptEntryId: compaction.firstKeptEntryId, details: compaction.details }] }
         }
       }
-      if (policy().enabled && event.context?.contextEntries && danger(ctx, event.context.contextEntries)) {
+      if (takeoverEnabled(ctx) && event.context?.contextEntries && danger(ctx, event.context.contextEntries)) {
         const compaction = await guardedReady(ctx, event.context.contextEntries)
         if (epoch !== selectedEpoch) return
         if (compaction) return { entries: [...(event.entries || []), { type: 'compaction', summary: compaction.summary, firstKeptEntryId: compaction.firstKeptEntryId, details: compaction.details }] }
@@ -301,7 +310,7 @@ export function registerPiCompaction(pi, options, {
     }
     try {
     prepare(ctx)
-    if (policy().enabled && unsafeInput()) {
+    if (takeoverEnabled(ctx) && unsafeInput()) {
       preserve() // Preserve the input before any cancellable capacity wait.
       const c = capacity(ctx)
       if (c && pending + c.fixed >= c.inputLimit) return defer()
@@ -318,7 +327,7 @@ export function registerPiCompaction(pi, options, {
       }
       return
     }
-    if (state?.ready && (reached(ctx, policy().ratio) || danger(ctx))) {
+    if (takeoverEnabled(ctx) && state?.ready && (reached(ctx, policy().ratio) || danger(ctx))) {
       preserve(); const swapped = await swapIdle(ctx)
       if (epoch !== selectedEpoch) return { action: 'handled' }
       if (!swapped) return defer()
@@ -331,7 +340,7 @@ export function registerPiCompaction(pi, options, {
     try {
       if (!policy().enabled&&!policy().summaryEnabled) return
       if (policy().summaryMode === 'main-fork') requestMessages = structuredClone(event.messages)
-      if(!policy().enabled)return
+      if(!takeoverEnabled(ctx))return
       // Native branches need the exact final wire request. Its later hook is
       // the capacity gate; aborting here would prevent cold-resume capture.
       if(policy().summaryMode==='main-fork')return
@@ -344,7 +353,7 @@ export function registerPiCompaction(pi, options, {
       const p = policy()
       if (!p.enabled && !p.summaryEnabled) {captureRecovery=false;return}
       let unsafe=false
-      if (p.enabled) {
+      if (takeoverEnabled(ctx)) {
         const c = capacity(ctx),payload=limitPiOutput(event.payload,ctx.model,piCompletionBudget(ctx.model,p.ratio,piOutputReserve(event.payload,ctx.model)))
         const limit = c && Math.min(c.inputLimit, ctx.model.contextWindow - piOutputReserve(payload,ctx.model) - piWindowSafety(ctx.model,p.ratio))
         unsafe=!c||estimatePiRequest(payload)>=limit
@@ -356,7 +365,7 @@ export function registerPiCompaction(pi, options, {
         prepare(ctx,unsafe||captureRecovery)
       }
       const recovering=captureRecovery;captureRecovery=false
-      if(p.enabled&&(unsafe||recovering)){pause(ctx);return}
+      if(takeoverEnabled(ctx)&&(unsafe||recovering)){pause(ctx);return}
       return event.payload
     } catch (error) { notice(ctx, error.message); pause(ctx) }
   })

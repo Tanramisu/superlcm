@@ -21,10 +21,8 @@ test('tool-only cutoff candidates collapse and a complete tool group remains int
   const messages = [msg('user', 'old request'), msg('assistant', 'old answer'), msg('assistant', '', { toolUses: [{ id: 'tool' }], size: 90000 }), msg('user', '', { toolResults: 1, size: 90000 }), msg('user', 'next request'), msg('assistant', 'next answer'), msg('user', 'latest request')]
   assert.equal(cutIndex(messages, events, 1), 2)
   const result = plan(messages)
-  assert.equal(result.use, true)
-  const retained = messages.slice(result.start)
-  assert.equal(retained.some(m => m.toolUses?.length), retained.some(m => m.toolResults))
-  assert.deepEqual(retained.filter(m => m.role === 'user').map(m => m.text), ['next request', 'latest request'])
+  assert.equal(result.use,false,'unverified previews cannot replace omitted tool payloads')
+  assert.ok(messages[2].toolUses.length&&messages[3].toolResults)
 })
 
 test('native continuation is verified from archived metadata, not a text prefix', t => {

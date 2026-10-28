@@ -8,6 +8,7 @@ import {dshSessionKey} from '../src/dsh.js'
 import {forkHash} from './fork-summary.js'
 import {markerFromSummary} from './marker.js'
 import {isDeepStrictEqual} from 'node:util'
+import {semanticLevel,semanticKind} from './tree-semantics.js'
 export class MainArchiveFork {
   constructor(ctx,native,home,warn){
     this.ctx=ctx;this.native=native;this.file=home;this.warn=warn;this.db=new ArchiveDatabase(native.path);this.store=new ClaudeStore(home);this.jobs=new Map();this.mirrored=new Map();this.stopped=false
@@ -25,7 +26,21 @@ export class MainArchiveFork {
           if(!node)throw Error('DSH 摘要原文引用缺失')
           const sources=node.sourceSeqs.flatMap(s=>expand(s,active));active.delete(seq);return sources
         }
-        const nodes=tree.map(n=>({...n,sources:[...new Set(n.sources.flatMap(seq=>expand(seq)))]}))
+        const all=new Map(tree.map(n=>[n.id,n]))
+        const include=(key,seen=new Set())=>{
+          if(seen.has(key))throw Error('DSH 摘要祖先成环')
+          let node=all.get(key)
+          if(!node){
+            if(!key.startsWith('native:'))throw Error('DSH 摘要祖先缺失')
+            const nativeId=key.slice(7),old=native.getNode(id,nativeId)
+            if(!old)throw Error('DSH 摘要祖先缺失')
+            node={id:key,nativeId,kind:semanticKind(native,id,nativeId),level:semanticLevel(native,id,nativeId)-1,summary:old.summaryText,sources:old.sourceSeqs,children:old.childIds.map(child=>'native:'+child)}
+            all.set(key,node)
+          }
+          const next=new Set([...seen,key]);for(const child of node.children)include(child,next)
+        }
+        for(const n of tree)include(n.id)
+        const nodes=[...all.values()].map(n=>({...n,sources:[...new Set(n.sources.flatMap(seq=>expand(seq)))]}))
         this.db.saveTree(id,nodes,owner,doc.revision,()=>readSettings(home).revision,rows,receipt)
         this.mirror(id)
       }finally{this.db.release(id,owner)}
@@ -48,12 +63,15 @@ export class MainArchiveFork {
     const ids=new Map(nodes.map((n,index)=>[n.id,index]))
     const tree=nodes.map((node,index)=>{
       const sourceRecords=node.sources.map(seq=>positions.get(seq).ordinal)
-      return {index,archiveId:'dsh-fork-'+forkHash([id,node.id]).slice(0,24),level:node.level,firstMessage:Math.min(...sourceRecords),lastMessage:Math.max(...sourceRecords),sourceRecords,children:node.children.map(child=>{if(!ids.has(child))throw Error('DSH 分支摘要树不完整');return ids.get(child)}),summary:node.summary}
+      const variant=this.db.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sl_summary_variants'").get()?this.db.db.prepare('SELECT summary FROM sl_summary_variants WHERE session=? AND id=?').get(id,node.id)?.summary:undefined
+      return {index,archiveId:node.nativeId?'dsh-native-'+node.nativeId:'dsh-fork-'+forkHash([id,node.id]).slice(0,24),level:node.level,kind:node.kind,modelSummary:variant,firstMessage:Math.min(...sourceRecords),lastMessage:Math.max(...sourceRecords),sourceRecords,children:node.children.map(child=>{if(!ids.has(child))throw Error('DSH 分支摘要树不完整');return ids.get(child)}),summary:node.summary}
     })
     const doc=readSettings(this.file)
     if(!doc.settings.summaryEnabled)return
     const receipt=this.db.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sl_fork_receipts'").get()&&this.db.db.prepare('SELECT * FROM sl_fork_receipts WHERE session=?').get(id)
     saveForkTree(this.store,session,{digest:forkHash(nodes.map(n=>n.id)),originals},tree,{model:receipt?.model||'dsh:session-model',usage:receipt?JSON.parse(receipt.usage):{},validate:()=>!this.stopped&&readSettings(this.file).revision===doc.revision})
+    this.store.db.exec('CREATE TABLE IF NOT EXISTS dsh_shared_nodes(session TEXT NOT NULL,id TEXT NOT NULL,visible INTEGER NOT NULL,PRIMARY KEY(session,id))')
+    for(const node of tree)if(node.kind==='assembled')this.store.db.prepare('INSERT INTO dsh_shared_nodes VALUES(?,?,0) ON CONFLICT(session,id) DO UPDATE SET visible=0').run(session,node.archiveId)
     this.mirrored.set(id,stamp)
   }
   afterCapture(id,settled=false){

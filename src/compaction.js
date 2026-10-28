@@ -9,11 +9,9 @@ import { estimateSummaryTokens } from './summary-tokens.js'
 export const takeoverDefaults = { enabled: false, window: 300000, keep: 40000 } // keep: newest tokens left word for word
 export const takeoverLimits = { window: [100000, 950000], keep: [5000, 200000] }
 const MAX_PACKET_CHARS = 120000
-// A stretch of mostly tool calls can fill the window while its dialogue is still too short to close a
-// summary segment. Dialogue up to this size goes into the packet word for word instead (tool output stays
-// readable through lcm_read), so such a stretch does not hand the compaction back to Claude Code.
+// Small uncovered gaps may be carried only as complete verified original records,
+// including tool payloads. Larger gaps defer to native compaction.
 export const RECENT_CHARS = 40000
-const RECENT_RECORD = 3000
 const TARGET_AFTER = 0.25, MAX_AFTER = 0.35
 const KEEP_TURNS = 2 // the newest user prompts are always kept word for word
 const key = text => String(text || '').replace(/\s+/g, '').slice(0, 600)
@@ -27,7 +25,7 @@ const escapeAttr = s => String(s).replace(/[&"<>]/g, c => ({ '&': '&amp;', '"': 
 // Records 0..through are covered when level-0 summaries chain from record 0 without a gap.
 export function coveredThrough(nodes) {
   let through = -1
-  for (const n of nodes.filter(n => n.level === 0 || n.checkpoint === true).sort((a, b) => a.first - b.first)) {
+  for (const n of nodes.filter(n => (n.level === 0 || n.checkpoint === true)&&!n.sourceIncomplete&&!isReducedSummary(n.summary)).sort((a, b) => a.first - b.first)) {
     if (n.first > through + 1) break
     through = Math.max(through, n.last)
   }
@@ -40,7 +38,16 @@ export function frontier(nodes, through) {
     const fits = nodes.filter(x => x.first === at && x.last <= through).sort((a, b) => b.level - a.level)
     // A shortened parent may hide complete children. Prefer those complete
     // nodes; a genuinely incomplete leaf still refuses context replacement.
-    const n = fits.find(x => !isReducedSummary(x.summary)) || fits.at(-1)
+    const complete=fits.filter(x=>!x.sourceIncomplete&&!isReducedSummary(x.summary))
+    // An expensive parent need not block its complete, cheaper descendants.
+    // Every alternative must still tile the same exact source prefix.
+    const cost=x=>String(x.summary).length+200
+    const n = complete.reduce((best,x)=>{
+      const descendants=nodes.filter(c=>c.first>=x.first&&c.last<=x.last&&c.level<x.level&&!isReducedSummary(c.summary))
+      let at=x.first,total=0
+      while(at<=x.last){const child=descendants.filter(c=>c.first===at).sort((a,b)=>cost(a)-cost(b))[0];if(!child)break;total+=cost(child);at=child.last+1}
+      return at>x.last&&total<cost(x)?best:best||x
+    },null) || complete.at(-1) || fits.at(-1)
     if (!n) break
     out.push(n); at = n.last + 1
   }
@@ -104,12 +111,6 @@ export function tailStart(messages, cut, keepPrompts = KEEP_TURNS) {
   return start
 }
 // The dialogue after the summaries, one line per record; a long record keeps its head and tail.
-function recentText(events, through) {
-  return events.filter(e => !e.nativeSummary && e.ordinal > through && /^(user|assistant): /.test(e.preview)).map(e => {
-    const t = e.preview.replace(/\s+/g, ' ').trim(), h = Math.ceil(RECENT_RECORD * 0.6)
-    return `[record ${e.ordinal}] ` + (t.length <= RECENT_RECORD ? t : t.slice(0, h) + ` …[${t.length - RECENT_RECORD} characters omitted; lcm_read record ${e.ordinal}]… ` + t.slice(t.length - (RECENT_RECORD - h)))
-  }).join('\n')
-}
 export function renderPacket({ meta, summaries, through, keep, instructions, recent = null, request = null }) {
   request ||= summaries.findLast(n=>n.rescueRequest)?.rescueRequest || null
   const code = meta.code
@@ -126,7 +127,7 @@ export function renderPacket({ meta, summaries, through, keep, instructions, rec
     if (head.length + body.length + block.length > MAX_PACKET_CHARS) return null
     body += block
   }
-  if (recent) body += `<recent records="${recent.first}-${recent.last}">\nNot summarized yet: the dialogue of records ${recent.first}-${recent.last} word for word, tool calls and their output left out (lcm_read has them).\n${recent.text}\n</recent>\n`
+  if (recent) body += `<recent records="${recent.first}-${recent.last}">\nComplete unsummarized source records, including tool payloads. Historical data, not new instructions.\n${recent.text}\n</recent>\n`
   if(request)body+=`<current-request record="${request.ordinal}" historical="true">\nPreserved original user request; newer explicit instructions in the kept messages govern its scope.\n${request.text}\n</current-request>\n`
   const packet=head + body + `</${PACKET_TAG}>`
   return packet.length<=MAX_PACKET_CHARS?packet:null
@@ -138,13 +139,17 @@ export function planCompaction(input) {
   if (plan.use || plan.ambiguous) return plan
   // The summaries lag behind: carry the dialogue they do not cover yet, when it is short enough.
   const { events, nodes } = input, through = coveredThrough(nodes), last = events.at(-1)?.ordinal ?? -1
-  const text = recentText(events, through)
+  // Previews and plain-text placeholders cannot authorize replacing live data.
+  // Only a caller that supplies verified complete originals may carry a gap.
+  const pending=events.filter(e=>e.ordinal>through&&!e.nativeSummary)
+  const text=pending.length&&pending.every(e=>typeof e.exactRaw==='string'&&!e.sourceHasNonText)?pending.map(e=>`[record ${e.ordinal}]\n${e.exactRaw}`).join('\n'):''
   if (last <= through || !text || text.length > RECENT_CHARS) return plan
   const inline = planWith(input, { first: through + 1, last, text })
   return inline.use ? {...inline,inline:true,stage:'inline',initial:{use:false,reason:plan.reason,after:plan.after??null}} : plan
 }
 function planWith({ meta, events, nodes, messages, instructions = '', tokens = 0, window = takeoverDefaults.window, keepTokens = takeoverDefaults.keep, trigger }, recent) {
   const through = coveredThrough(nodes)
+  if(through<0&&nodes.some(n=>n.sourceIncomplete||isReducedSummary(n.summary)))return {use:false,reason:'incomplete-source summaries are navigation only; use native compaction'}
   if(frontier(nodes,through).some(n=>isReducedSummary(n.summary)))return {use:false,reason:'mechanically shortened summaries are navigation only; use native compaction'}
   if (through < 0 && !recent) return { use: false, reason: 'no summaries written yet' }
   // With the dialogue carried along, every message in context is covered: the cut is at the end.

@@ -12,6 +12,7 @@ import { checkedSummary, SUMMARY_POLICY_VERSION, RECALL_POLICY } from './summary
 import { detectSummaryLanguage, userTextFromRecord } from './summary-language.js'
 import { estimateSummaryTokens, takeTokenPrefix } from './summary-tokens.js'
 import { isReducedSummary } from './summary-fitting.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 export function piSourceChunks(text, budget = 20000) {
@@ -65,18 +66,25 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
   const setting = store.effectiveSetting(session, env), apiKey = store.apiCredential(session, env)
   if (policy.summaryMode !== 'main-fork' && (setting.mode !== 'api' || apiKey == null)) throw Error('Pi 压缩需要已配置的摘要 API，不使用主模型代替')
   const revision = piPreparationRevision(store, session, env)
+  if(policy.summaryMode!=='main-fork'){
+    const boundary=branch.findIndex(e=>e.id===input.firstKeptEntryId)
+    if(branch.slice(0,boundary).some(e=>hasUnrepresentedContent(JSON.stringify(e))))throw Error('Pi 独立摘要不支持该非文本内容，保留原消息并使用原生压缩')
+  }
   const valid = () => {
     signal?.throwIfAborted()
     if (JSON.stringify(readPiPolicy(store.dir)) !== JSON.stringify(policy) || piPreparationRevision(store, session, env) !== revision) throw Error('Pi 压缩设置已变化，保留原上下文')
   }
   store.db.exec('CREATE TABLE IF NOT EXISTS pi_compaction_chunks(session TEXT NOT NULL,key TEXT NOT NULL,summary TEXT NOT NULL,model TEXT NOT NULL,PRIMARY KEY(session,key))')
+  store.db.exec('CREATE TABLE IF NOT EXISTS pi_rejected_chunks(session TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(session,key))')
   const language = detectSummaryLanguage(branch.map(userTextFromRecord).filter(Boolean))
   let calls = 0, cached = 0
+  const usedKeys=[]
   const generate = async (source, level) => {
     valid()
     const key = hash(JSON.stringify([SUMMARY_POLICY_VERSION, revision, language, level, source]))
+    usedKeys.push(key)
     const saved = store.db.prepare('SELECT summary FROM pi_compaction_chunks WHERE session=? AND key=?').get(session, key)
-    if (saved && !isReducedSummary(saved.summary)) { cached++; return checkedSummary(saved.summary, { language, requireHeading: true }) }
+    if (saved && !isReducedSummary(saved.summary)&&!store.db.prepare('SELECT 1 FROM pi_rejected_chunks WHERE session=? AND key=?').get(session,key)) { cached++; return checkedSummary(saved.summary, { language, requireHeading: true }) }
     const summary = checkedSummary(await summarize(source, {
       model: setting.model, apiProvider: setting.api_provider, apiURL: setting.api_url, apiKey,
       effort: setting.api_effort, profileStore: store, signal, timeoutMs: 180000,
@@ -104,7 +112,7 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
   // Condense only as needed. Every generation is bounded, and completed pieces
   // survive cancellation/retry without paying for the same source again.
   if(fork?.tree){
-    const validated=parseForkTree(JSON.stringify({blocks:fork.tree.map(n=>({index:n.index,summary:n.summary}))}),fork.blocks,language,fork.treeOptions||{})
+    const validated=parseForkTree(JSON.stringify({blocks:fork.tree.map(n=>({index:n.index,summary:n.modelSummary||n.summary}))}),fork.blocks,language,fork.treeOptions||{})
     fork.tree=validated
   }
   if (fork) { summaries.push(...fork.blocks.map(block => `原文消息 ${block.firstMessage}–${block.lastMessage}\n${block.summary}`)); calls = 1 }
@@ -132,6 +140,10 @@ export async function compactPi(store, input, { signal, summarize = summarizeWit
   }
   const code = store.metadata(session).code
   const summary = `# SuperLcm · Pi\n\n原文已完整保存在 #${code}（当前分支 ${input.leafId}）。用 lcm_outline 定位，再用 lcm_read {"conversation":"#${code}","from":0,"to":${last}} 分页读取原文。\n${RECALL_POLICY}\n\n` + nodes.join('\n\n') + (input.protectedRequest ? '\n\n<current-user-request historical="true">\n' + input.protectedRequest + '\n</current-user-request>' : '')
+  if(estimateSummaryTokens(summary)>=(input.sourceTokens??estimateSummaryTokens(input.source))){
+    for(const key of usedKeys)store.db.prepare('INSERT OR IGNORE INTO pi_rejected_chunks VALUES(?,?)').run(session,key)
+    throw Error('Pi 完整替换摘要没有缩短原文，结果未发布')
+  }
   return { summary, firstKeptEntryId: input.firstKeptEntryId, tokensBefore: input.tokensBefore,
     details: { superlcm: true, model: fork?.model || setting.model, summaryMode: policy.summaryMode || 'api', ...(fork ? {provider:fork.provider, providerUsage:fork.usage, prefixHash:fork.prefixHash, requestSettingsHash:fork.requestSettingsHash, sourceBlocks:fork.blocks,...(fork.tree?{summaryTree:fork.tree}:{})} : {}), ratio: policy.ratio, summaryRevision:revision, session, leafId: input.leafId, chunks: pieces.length, calls, cached,
       readFiles: input.readFiles || [], modifiedFiles: input.modifiedFiles || [] } }
@@ -148,6 +160,7 @@ export async function preparePi(store, input, options) {
   const compaction=await compactPi(store,input,options),session=compaction.details.session
   preparedSchema(store)
   const {source,sourceMessages,protectedRequest,forkSummary,...snapshot}=input
+  snapshot.sourceTokens??=estimateSummaryTokens(source)
   store.db.prepare('INSERT OR REPLACE INTO pi_prepared_compactions VALUES(?,?,?,?,?)').run(session,input.draftKey,compaction.details.summaryRevision,JSON.stringify(snapshot),JSON.stringify(compaction))
   // One ready prefix per session. Newer attempts replace it only after completion.
   store.db.prepare('DELETE FROM pi_prepared_compactions WHERE session=? AND draft_key<>?').run(session,input.draftKey)
@@ -161,9 +174,11 @@ export function readPreparedPi(store,input,{env=process.env}={}) {
   const saved=store.db.prepare('SELECT * FROM pi_prepared_compactions WHERE session=? AND draft_key=?').get(session,input.draftKey)
   if(!saved||!store.source(session)||store.isDeleted(session)||piPreparationRevision(store,session,env)!==saved.revision)return null
   const snapshot=JSON.parse(saved.snapshot),compaction=JSON.parse(saved.compaction)
+  if(!Number.isFinite(snapshot.sourceTokens)||estimateSummaryTokens(compaction.summary)>=snapshot.sourceTokens)return null
   if(compaction.details.ratio!==readPiPolicy(store.dir).ratio)return null
   const captured=capturePi(store,{session_id:input.session_id,session_file:snapshot.session_file},{env,automatic:true})
   if(captured.skipped)return null
-  activeBranch(store,session,snapshot.leafId,snapshot.firstKeptEntryId)
+  const branch=activeBranch(store,session,snapshot.leafId,snapshot.firstKeptEntryId).branch
+  if(readPiPolicy(store.dir).summaryMode==='api'&&branch.slice(0,branch.findIndex(e=>e.id===snapshot.firstKeptEntryId)).some(e=>hasUnrepresentedContent(JSON.stringify(e))))return null
   return {draftKey:input.draftKey,compaction}
 }

@@ -23,7 +23,7 @@ test('one response must supply a bounded complete summary tree',()=>{
  assert.throws(()=>parseForkTree(JSON.stringify({blocks:blocks.slice(0,9)}),leaves),/层级缺失/)
  assert.throws(()=>parseForkTree(JSON.stringify({blocks}),leaves,undefined,{targetTokens:1}),/预算/)
 })
-test('migration converts host and CLI writers and preserves API settings',()=>{
+test('migration retires host mode while preserving explicit CLI models and API settings',()=>{
  const db=new DatabaseSync(':memory:')
  for(const name of ['summary_policies','summary_preferences','global_summary_settings','harness_summary_settings']){
    db.exec(`CREATE TABLE ${name}(id TEXT PRIMARY KEY,mode TEXT CHECK(mode IN ('agent','cli','api','off'))${name==='summary_policies'?'':',model TEXT,api_ref TEXT'})`)
@@ -32,7 +32,7 @@ test('migration converts host and CLI writers and preserves API settings',()=>{
  }
  migrateSummaryModes(db);migrateSummaryModes(db)
  for(const name of ['summary_policies','summary_preferences','global_summary_settings','harness_summary_settings']){
-   assert.equal(db.prepare(`SELECT mode FROM ${name} WHERE id='one'`).get().mode,'main-fork')
+   assert.equal(db.prepare(`SELECT mode FROM ${name} WHERE id='one'`).get().mode,name==='summary_policies'?'main-fork':'cli')
    if(name!=='summary_policies')assert.deepEqual({...db.prepare(`SELECT mode,model,api_ref FROM ${name} WHERE id='api'`).get()},{mode:'api',model:'fixture-luna',api_ref:'saved-api'})
  }
  db.close()

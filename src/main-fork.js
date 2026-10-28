@@ -73,7 +73,9 @@ export function saveForkTree(store,session,plan,tree,{model,usage={},branchId=nu
     for(const row of plan.originals){store.exact(session,row.ordinal);if(store.db.prepare('SELECT digest FROM events WHERE session=? AND ordinal=?').get(session,row.ordinal)?.digest!==row.digest)throw Error('摘要原文已变化，结果未保存')}
     const ids=tree.map(n=>n.archiveId||'s'+n.level+'-'+forkHash([session,plan.digest,n.index,n.summary]).slice(0,24))
     for(const node of tree){
-      const inserted=store.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(session,ids[node.index],node.level,node.firstMessage,node.lastMessage,JSON.stringify(node.children.map(i=>ids[i])),node.summary,plan.digest,model)
+      const inserted=store.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(session,ids[node.index],node.semanticLevel??node.level,node.firstMessage,node.lastMessage,JSON.stringify(node.children.map(i=>ids[i])),node.summary,plan.digest,model)
+      if(node.modelSummary){store.db.exec('CREATE TABLE IF NOT EXISTS fork_parent_variants(session TEXT,id TEXT,summary TEXT,PRIMARY KEY(session,id))');store.db.prepare('INSERT OR IGNORE INTO fork_parent_variants VALUES(?,?,?)').run(session,ids[node.index],node.modelSummary)}
+      store.db.prepare('INSERT OR IGNORE INTO summary_node_quality VALUES(?,?,1)').run(session,ids[node.index])
       if(node.sourceRecords){
         store.db.exec('CREATE TABLE IF NOT EXISTS dsh_node_sources(session TEXT NOT NULL,id TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(session,id,seq))')
         for(const seq of node.sourceRecords){if(!plan.originals.some(r=>r.ordinal===seq)||seq<node.firstMessage||seq>node.lastMessage)throw Error('摘要来源不属于当前分支');store.db.prepare('INSERT OR IGNORE INTO dsh_node_sources VALUES(?,?,?)').run(session,ids[node.index],seq)}
@@ -137,7 +139,7 @@ export async function generateMainFork(store,session,{runId,signal,shouldContinu
       }catch(error){
         assertCurrent()
         if(!error.summaryKind&&(error instanceof SyntaxError||/分块|层级|分支摘要/.test(error.message)))error.summaryKind='response_invalid'
-        if(!retry||classifySummaryError(error)==='spawn')throw error
+        if(!retry)throw error
         if(['response_invalid','quality'].includes(classifySummaryError(error)))retryNote='\nThe previous response failed summary validation. Return only the required JSON object, with every planned leaf and parent exactly once in index order. Start each summary with a heading in the requested language. Do not call tools or continue the task.'
         const delay=Math.min(300000,30000*2**Math.min(attempt-1,4)),safe=summaryErrorDetail(error)
         if(runId)store.db.prepare("UPDATE summary_runs SET heartbeat_ms=?,error_kind=?,error_message=? WHERE id=? AND owner=? AND state='running'").run(Date.now(),safe.kind,`后台分支摘要第 ${attempt} 次未完成。将在 ${delay/1000} 秒后自动重试，原文已保留。`,runId,owner)

@@ -3,7 +3,7 @@ import {join} from 'node:path'
 import {homedir} from 'node:os'
 import {claudeTranscript} from './store.js'
 import {buildHierarchy,summarySettingsRevision,summaryEstimate,summaryWork} from './summarize.js'
-import {summarizeWith,writerTool,WRITER_CLI} from './cli-writers.js'
+import {summarizeWith,writerTool,hostWriterTool,WRITER_CLI} from './cli-writers.js'
 import {scheduleSummary} from './summary-scheduler.js'
 import {RECENT_CHARS} from './compaction.js'
 
@@ -48,7 +48,7 @@ export function summaryTick(store,id,{env=process.env,spawnProcess,tokens=0,wind
  if(mode==='main-fork')return {scheduled:scheduleSummary(store,id,mode,null,{env,tokens,window,...(spawnProcess?{spawnProcess}:{})})}
  const work=summaryWork(store,id),revision=summarySettingsRevision(store,id,env)
  if(!work||store.summaryRetry(id,work.batch_id,revision))return {none:'no eligible work'}
- if(mode==='cli'&&writerTool('claude-code',env)==='claude-code'){store.setHostWriter(id,true);return {host:true}}
+ if(mode==='cli'&&hostWriterTool('claude-code',env)==='claude-code'){store.setHostWriter(id,true);return {host:true}}
  return {scheduled:scheduleSummary(store,id,mode,model,{env,...(spawnProcess?{spawnProcess}:{})})}
 }
 export const catchupDeadlineMs = (env=process.env) => {

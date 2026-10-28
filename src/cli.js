@@ -6,7 +6,7 @@ import { codexTranscript, codexSessionKey } from './codex.js'
 import { nativeConversationName } from './conversation-names.js'
 import { buildHierarchy, summaryWork, summarySettingsRevision } from './summarize.js'
 import { SUMMARY_SYSTEM, buildSummaryPrompt, checkedSummary } from './summary-policy.js'
-import { summarizeWith, writerTool, WRITER_CLI } from './cli-writers.js'
+import { summarizeWith, writerTool,hostWriterTool, WRITER_CLI } from './cli-writers.js'
 import { startServer } from './mcp.js'
 import { claudePluginEnabled } from './runtime.js'
 import { startWeb, defaultPort } from './web.js'
@@ -277,7 +277,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       if(input.trigger!=='precompute'&&!input.afterCatchup&&!reply.use&&!reply.ambiguous&&reply.stage!=='inline'&&!reply.inline&&eligible){
         const pending=pendingLeaves(store,session),deadlineMs=catchupDeadlineMs(),chosen=effective(store,session),harness=store.metadata(session).harness
         if(deadlineMs>0&&pending>=1&&pending<=4&&store.integrationEnabled(harness)&&['cli','api'].includes(chosen.mode)){
-          if(chosen.mode==='cli'&&writerTool(harness)==='claude-code')reply={...reply,catchup:{host:true,deadlineMs,maxPieces:4}}
+          if(chosen.mode==='cli'&&hostWriterTool(harness)==='claude-code')reply={...reply,catchup:{host:true,deadlineMs,maxPieces:4}}
           else {
             const started=Date.now()
             try{await catchUp(store,session,{deadlineMs,maxPieces:4})}catch{}
@@ -291,7 +291,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       if(!reply.use&&!reply.ambiguous&&mayWrite&&['coverage_lag','uncovered_oldest','no_summaries','context_too_large'].includes(compactionDiagnostic(reply).code)){
         const work=summaryWork(store,session),revision=summarySettingsRevision(store,session)
         if(work&&!store.summaryRetry(session,work.batch_id,revision)){
-          reply.retry=chosen.mode==='cli'&&writerTool(harness)==='claude-code'?'host':true
+          reply.retry=chosen.mode==='cli'&&hostWriterTool(harness)==='claude-code'?'host':true
           if(reply.retry!=='host'&&!reply.catchup)try{
             const scheduled=scheduleSummary(store,session,chosen.mode,chosen.model)
             if(!scheduled&&!store.summarizing(session)&&!activeSummaryRun(store,session))delete reply.retry
@@ -341,7 +341,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
       const src=store.source(session)
       if(!src||store.isDeleted(session))throw Object.assign(new Error('conversation not recorded by SuperLcm'),{none:true})
       const {mode,model}=effective(store,session)
-      if(mode!=='cli'||writerTool(store.metadata(session).harness)!=='claude-code')throw Object.assign(new Error('summaries are not written by Claude Code for this conversation'),{none:true})
+      if(mode!=='cli'||hostWriterTool(store.metadata(session).harness)!=='claude-code')throw Object.assign(new Error('summaries are not written by Claude Code for this conversation'),{none:true})
       if(command==='summary-check'){
         const input=await readHook(),claim=store.db.prepare('SELECT * FROM host_summary_claims WHERE session=?').get(session)
         const revision=summarySettingsRevision(store,session)
@@ -399,7 +399,7 @@ else if (command==='hook' || command==='codex-hook' || command==='index' || comm
           if(work.level===0)for(let i=work.first;i<=work.last;i++)store.exact(session,i)
           persistence=true
           retainHostDraft(store,session,work,claim,input,summary)
-          store.addNode({session,id:work.batch_id,level:work.level,first:work.first,last:work.last,children:work.children,summary,digest:work.digest,model:`claude-code-host:${String(input.model||'configured').slice(0,80)}`},{leaseOwner:'host',validate:current})
+          store.addNode({session,id:work.batch_id,level:work.level,first:work.first,last:work.last,children:work.children,summary,sourceComplete:!work.reducedSources,digest:work.digest,model:`claude-code-host:${String(input.model||'configured').slice(0,80)}`},{leaseOwner:'host',validate:current})
           store.completeSummaryBatch(session,work.batch_id,claim.revision)
           if(claim.run_id){progressSummaryRun(store,claim.run_id,'host:'+claim.claim_id,{created:1});finishSummaryRun(store,claim.run_id,{owner:'host:'+claim.claim_id,state:'done'})}else store.setStatus(session,'ok')
           reply={saved:true,more:Boolean(summaryWork(store,session))}

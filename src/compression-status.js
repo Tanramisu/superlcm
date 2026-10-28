@@ -19,7 +19,11 @@ const schema = `CREATE TABLE IF NOT EXISTS superlcm_compression_runtime(
   CREATE INDEX IF NOT EXISTS superlcm_compression_runtime_updated ON superlcm_compression_runtime(updated_ms);
   CREATE TABLE IF NOT EXISTS superlcm_compression_retry(
     instance TEXT NOT NULL,session TEXT NOT NULL,attempt INTEGER NOT NULL,failures INTEGER NOT NULL,
-    retry_at INTEGER,error_kind TEXT,PRIMARY KEY(instance,session));`
+    retry_at INTEGER,error_kind TEXT,PRIMARY KEY(instance,session));
+  CREATE TABLE IF NOT EXISTS superlcm_compression_attempt_failures(
+    id INTEGER PRIMARY KEY,instance TEXT NOT NULL,session TEXT NOT NULL,attempt INTEGER NOT NULL,
+    error_kind TEXT NOT NULL,at_ms INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS superlcm_compression_attempt_failures_session ON superlcm_compression_attempt_failures(instance,session,id);`
 export class CompressionReporter {
   constructor(db, { kind, profile = null, enabled = false, routeReady = false, clock = Date.now, onError = () => {} }) {
     this.db = db; this.clock = clock; this.onError = onError; this.instance = randomUUID()
@@ -43,6 +47,9 @@ export class CompressionReporter {
         .run(this.instance,session,selection.attempt,selection.failures??0,selection.retryAt??null,selection.errorKind??null)
       else if(phase==='summarizing')this.db.prepare('DELETE FROM superlcm_compression_retry WHERE instance=? AND session=?').run(this.instance,session)
       else if(phase!=='retrying')this.db.prepare('UPDATE superlcm_compression_retry SET retry_at=NULL WHERE instance=? AND session=?').run(this.instance,session)
+      if(phase==='retrying' && Number.isSafeInteger(selection.attempt) && /^[a-z_]{1,40}$/.test(selection.errorKind||''))
+        this.db.prepare('INSERT INTO superlcm_compression_attempt_failures(instance,session,attempt,error_kind,at_ms) VALUES(?,?,?,?,?)')
+          .run(this.instance,session,selection.attempt,selection.errorKind,this.clock())
     } catch (error) { this.onError(error) }
   }
   configure({ enabled, routeReady }) { this.enabled = enabled; this.routeReady = routeReady; this.report('', this.phase) }
@@ -69,6 +76,11 @@ export function compressionSnapshot(store, { now = Date.now(), alive = pid => { 
   if(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='superlcm_compression_retry'").get())for(const job of jobs){
     const retry=store.db.prepare('SELECT attempt,failures,retry_at,error_kind FROM superlcm_compression_retry WHERE instance=? AND session=?').get(job.instance,job.session)
     if(retry)Object.assign(job,retry)
+  }
+  if(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='superlcm_compression_attempt_failures'").get())for(const job of jobs){
+    if(!job.failures)continue
+    const last=store.db.prepare('SELECT attempt,error_kind,at_ms FROM superlcm_compression_attempt_failures WHERE instance=? AND session=? ORDER BY id DESC LIMIT 1').get(job.instance,job.session)
+    if(last)job.last_failure=last
   }
   return { runtimes, jobs }
 }

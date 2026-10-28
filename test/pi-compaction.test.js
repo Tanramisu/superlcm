@@ -16,14 +16,14 @@ function fixture(t) {
   const root = join(dir, 'pi'), sessions = join(root, 'sessions'); mkdirSync(sessions, { recursive: true })
   const session_id = 'pi-test', session_file = join(sessions, 'test.jsonl')
   const entries = [{ type: 'session', id: session_id },
-    { type: 'message', id: 'a', parentId: null, message: { role: 'user', content: 'Please inspect the project, preserving every original.' } },
+    { type: 'message', id: 'a', parentId: null, message: { role: 'user', content: 'Please inspect the project, preserving every original. '+ 'Historical inspection evidence. '.repeat(400) } },
     { type: 'message', id: 'b', parentId: 'a', message: { role: 'assistant', content: [{ type: 'text', text: 'Inspection is unfinished.' }] } },
     { type: 'message', id: 'c', parentId: 'b', message: { role: 'user', content: 'Keep the newest request exactly.' } }]
   writeFileSync(session_file, entries.map(JSON.stringify).join('\n') + '\n')
   const m = store.saveApiModel({ provider: 'openai', model: 'fixture-luna', url: 'http://127.0.0.1:9/v1', effort: 'high' })
   store.setHarnessSetting('pi', 'api', null, null, null, m.id); store.setIntegrationEnabled('pi', true)
   savePiPolicy(store, { enabled: true, ratio: 0.8 })
-  const input = { session_id, session_file, leafId: 'c', firstKeptEntryId: 'c', tokensBefore: 100000, source: 'user:\nPlease inspect the project, preserving every original.\nassistant:\nInspection is unfinished.' }
+  const input = { session_id, session_file, leafId: 'c', firstKeptEntryId: 'c', tokensBefore: 100000, source: serializePiMessages(entries.slice(1,3).map(e=>e.message)) }
   return { dir, store, input, entries, env: { ...process.env, PI_CODING_AGENT_DIR: root } }
 }
 const summary = '# Current state\nThe inspection is unfinished. All source records remain available.\n\n## Recall for details\nRead the original tool outputs before using exact values.'
@@ -50,7 +50,8 @@ test('Pi rejects a wrong branch boundary, deleted capture and missing API before
   const options = { env: f.env, summarize: async () => { calls++; return summary } }
   await assert.rejects(compactPi(f.store, { ...f.input, firstKeptEntryId: 'other-branch' }, options), /保留边界/)
   f.store.setHarnessSetting('pi', 'cli')
-  await assert.rejects(compactPi(f.store, f.input, options), /摘要 API|后台分支摘要/)
+  await assert.rejects(compactPi(f.store, f.input, options), /接管未启用|摘要 API|后台分支摘要/)
+  f.store.setHarnessSetting('pi','api',null,null,null,f.store.apiModels()[0].id)
   f.store.db.prepare('INSERT INTO deleted_sessions VALUES(?,?)').run('pi-pi-test', Date.now())
   await assert.rejects(compactPi(f.store, f.input, options), /归档尚未完成/)
   assert.equal(calls, 0)
@@ -150,6 +151,29 @@ test('Pi custom replacement above 90% is not pulled back by the default pressure
   r.ctx.tokens=495000
   assert.equal((await turn(r)).entries[0].type,'compaction')
  }finally{r.handlers.get('session_shutdown')()}
+})
+
+test('Pi runtime keeps a progressing background branch past the idle limit',async t=>{
+ const gates=[];let calls=0,prepared
+ const r=runtime({readPolicy:mainForkPolicy,
+  responder:async(opts,snap)=>opts.command==='pi-stage'?{revision:'fixed'}:opts.command==='pi-prepare'?(prepared={compaction:{summary,firstKeptEntryId:snap.firstKeptEntryId}}):prepared||null,
+  fork:async(_ctx,_snap,_capture,{stage,progress})=>{
+   calls++;await stage()
+   for(let i=0;i<3;i++){await new Promise(resolve=>gates.push(resolve));progress()}
+   return {blocks:[],tree:[]}
+  }})
+ try{
+  r.rows[0].messages[0].content='compressible history '.repeat(10000)
+  t.mock.timers.enable({apis:['setTimeout','Date']});captureRuntime(r)
+  await until(()=>gates.length===1)
+  for(let i=0;i<3;i++){
+   t.mock.timers.tick(540000);gates.shift()()
+   if(i<2)await until(()=>gates.length===1)
+  }
+  await until(()=>r.api.getState()?.ready)
+  assert.equal(calls,1);assert.equal(r.api.getState().attempt,1)
+  assert.equal(r.commands.filter(c=>c==='pi-prepare').length,1)
+ }finally{r.handlers.get('session_shutdown')();for(const release of gates)release();t.mock.timers.reset()}
 })
 
 test('Pi retries independently past fifty minutes and keeps pressure waiting until the eighth attempt succeeds',async t=>{
@@ -576,7 +600,9 @@ for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'
   model:'fixture-main',provider:'fixture',sourceDigest:forkHash(f.input.source),prefixHash:'prefix',requestSettingsHash:'settings',usage:{cacheRead:9000},
   blocks:leaves,tree,treeOptions:{fanout:4,targetTokens:limit}}}
  const options={env:f.env,summarize:async()=>{throw Error('must not regenerate a completed tree')}}
- if(fault){
+ if(fault==='root'){
+  const prepared=await preparePi(f.store,input,options);assert.ok(prepared.compaction.details.summaryTree.at(-1).modelSummary);assert.ok(prepared.compaction.summary.length<tree.at(-1).summary.length)
+ }else if(fault){
   await assert.rejects(preparePi(f.store,input,options),fault==='missing'?/层级缺失/:fault==='root'?/摘要仍超出预算/:/总输出预算/)
   assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM pi_prepared_compactions').get().n,0)
   assert.equal(f.store.nodeRows('pi-pi-test',0).length,0)
@@ -593,7 +619,7 @@ for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'
   assert.deepEqual(readPreparedPi(f.store,input,{env:f.env}),prepared)
   const obsolete={...prepared.compaction,summary:'# Obsolete prepared result\n'+'pending '.repeat(20000)}
   f.store.db.prepare('UPDATE pi_prepared_compactions SET compaction=? WHERE session=? AND draft_key=?').run(JSON.stringify(obsolete),'pi-pi-test',input.draftKey)
-  assert.equal(readPreparedPi(f.store,input,{env:f.env}).compaction.summary,obsolete.summary)
+  assert.equal(readPreparedPi(f.store,input,{env:f.env}),null)
   const repaired=await preparePi(f.store,input,options)
   assert.equal(repaired.compaction.summary,prepared.compaction.summary,'a fresh valid fork can replace an unusable saved draft')
  }
@@ -773,4 +799,19 @@ test('changing Pi retention invalidates an already prepared API replacement with
  assert.ok(readPreparedPi(f.store,f.input,{env:f.env}))
  savePiPolicy(f.store,{enabled:true,ratio:.8,keep:80000})
  assert.equal(readPreparedPi(f.store,f.input,{env:f.env}),null);assert.equal(calls,1)
+})
+
+test('independent API cannot replace an unseen archived image',async t=>{
+ const f=fixture(t);f.entries[1].message.content=[{type:'image',data:'synthetic-image',mimeType:'image/png'}]
+ writeFileSync(f.input.session_file,f.entries.map(JSON.stringify).join('\n')+'\n')
+ f.input.source=serializePiMessages(f.entries.slice(1,3).map(e=>e.message));let calls=0
+ await assert.rejects(compactPi(f.store,f.input,{env:f.env,summarize:async()=>{calls++;return summary}}),/非文本内容/)
+ assert.equal(calls,0);assert.ok(f.store.exact('pi-pi-test',1).includes('synthetic-image'))
+})
+test('an unsuitable standalone API result does not trap the same source in its cache',async t=>{
+ const f=fixture(t);f.entries[1].message.content='Historical inspection evidence. '.repeat(100);writeFileSync(f.input.session_file,f.entries.map(JSON.stringify).join('\n')+'\n');const input={...f.input,source:serializePiMessages(f.entries.slice(1,3).map(e=>e.message)),draftKey:'d'.repeat(64)};let calls=0
+ const options={env:f.env,summarize:async()=>{calls++;return calls===1?'# State\n'+ 'Inspection remains pending. '.repeat(180):summary}}
+ await assert.rejects(preparePi(f.store,input,options),/没有缩短/)
+ const result=await preparePi(f.store,input,options);assert.ok(result.compaction);assert.equal(calls,2)
+ assert.deepEqual(await readPreparedPi(f.store,input,{env:f.env}),result)
 })

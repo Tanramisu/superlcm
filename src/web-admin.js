@@ -309,7 +309,7 @@ function writerRows(h) {
   const savedMode=x?x.mode:s.global.mode,mode=savedMode==='agent'?'main-fork':savedMode,rows=[]
   const writers=mode==='cli'?[['cli',t('兼容模式：旧版后台写')],...WRITERS]:WRITERS
   rows.push([t('摘要生成'), '<select aria-label="' + t('摘要生成') + '" data-tool="' + esc(h.harness) + '">' + writers.map(([id, label]) => '<option value="' + id + '"' + (mode === id ? ' selected' : '') + '>' + label + '</option>').join('') + '</select>'])
-  if (mode === 'main-fork') rows.push([t('模型'), '<span>'+t('跟随当前对话模型与账号')+'</span>'])
+  if (mode === 'main-fork') rows.push([t('模型'), '<span>'+esc((x?x.model:s.global.model)||t('跟随当前对话模型与账号'))+'</span>'])
   if (mode === 'cli' && h.bin) rows.push([t('模型'), '<select aria-label="' + t('模型') + '" data-model="' + esc(h.harness) + '"><option value="' + esc(x?.model || '') + '">' + esc(x?.model || t('跟随 {tool} 当前模型', { tool: toolName(h.harness) })) + '</option></select>'])
   if (mode === 'cli' && h.harness === 'claude-code' && h.claude?.plugin?.enabled) rows.push(['', '<span class="muted">' + t('Claude Code 2.1.286+ 在对话里直接调用这个模型，不另开会话；对话结束后剩下的交给后台命令行补完') + '</span>'])
   if (mode === 'api') {

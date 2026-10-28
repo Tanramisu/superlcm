@@ -11,6 +11,65 @@ function tree(options) {
  return JSON.stringify({blocks:plan.map(p=>({index:p.index,summary:'# Historical state\nPreserve original constraints, source references and pending work.'}))})
 }
 
+test('a native fork can run past ten minutes while real output continues',async t=>{
+ const h=await lab({capacity:500000,config:{summaryMode:'main-fork',summaryTimeoutMs:600000,summaryRetryCooldownMs:1000}})
+ const original=h.ctx.llm.stream.bind(h.ctx.llm),gates=[];let branches=0,pending
+ try{
+  history(h,.91)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches++
+   for(let i=0;i<3;i++){
+    await new Promise(resolve=>gates.push(resolve))
+    yield {type:'reasoning-delta',index:0,text:'ongoing model output'}
+   }
+   yield {type:'text-delta',index:1,text:tree(options)}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  t.mock.timers.enable({apis:['setTimeout','Date']})
+  pending=send(h,'PRESERVE INPUT WHILE SUMMARY IS STREAMING',{timeout:10000000})
+  await until(()=>gates.length===1)
+  for(let i=0;i<3;i++){
+   t.mock.timers.tick(540000)
+   assert.equal(h.engine.backgroundFolds.get(h.agent)?.status,'summarizing')
+   gates.shift()()
+   if(i<2)await until(()=>gates.length===1)
+  }
+  await pending
+  assert.equal(branches,1,'progress must not restart a healthy stream')
+  assert.equal(count(h,'compaction/summary'),1)
+  assert.ok(h.main[0].content.includes('PRESERVE INPUT WHILE SUMMARY IS STREAMING'))
+ }finally{
+  h.agent.cancel({kind:'user'},{keepInbox:true});for(const release of gates)release();t.mock.timers.reset()
+  await pending;await close(h)
+ }
+})
+
+test('empty stream activity cannot keep an unproductive native fork alive',async t=>{
+ const h=await lab({capacity:500000,config:{summaryMode:'main-fork',summaryTimeoutMs:600000,summaryRetryCooldownMs:1000}})
+ const original=h.ctx.llm.stream.bind(h.ctx.llm);let release,pending,started=false,emitted=false
+ try{
+  history(h,.91)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   started=true;await new Promise(resolve=>release=resolve)
+   yield {type:'reasoning-delta',index:0,text:'   '}
+   yield {type:'usage',usage:{inputTokens:1}}
+   emitted=true;await new Promise(()=>{})
+  })()
+  t.mock.timers.enable({apis:['setTimeout','Date']})
+  pending=send(h,'PRESERVE INPUT ACROSS AN IDLE FORK',{timeout:10000000})
+  await until(()=>started)
+  t.mock.timers.tick(540000);release();await until(()=>emitted)
+  t.mock.timers.tick(60001)
+  await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
+  const state=h.engine.backgroundFolds.get(h.agent)
+  assert.equal(state.errorKind,'timeout');assert.equal(state.failures,1)
+  assert.equal(count(h,'compaction/summary'),0);assert.equal(h.main.length,0)
+ }finally{
+  h.agent.cancel({kind:'user'},{keepInbox:true});release?.();t.mock.timers.reset()
+  await pending;await close(h)
+ }
+})
+
 test('native fork retries beyond ten total minutes and five failures while the admitted request stays paused',async t=>{
  const h=await lab({capacity:500000,config:{summaryMode:'main-fork',summaryTimeoutMs:600000,summaryRetryCooldownMs:1000}})
  const original=h.ctx.llm.stream.bind(h.ctx.llm),branches=[]

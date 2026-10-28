@@ -1,4 +1,5 @@
 import {legacyDshSource} from './dsh-evidence.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
 import {claudeCheckpoints} from './claude-checkpoints.js'
 import { profileKey, readSummaryProfile, updateSummaryProfile, visibleOutputRoom, adaptiveSummaryTask, fitSummary, isReducedSummary, reducedNotice } from './summary-generation.js'
 import { readOpenAICompletion, readSummaryJson, readSummaryText, summaryFailure, STREAM_COMPLETE } from './summary-response.js'
@@ -182,6 +183,7 @@ export function summaryWork(store, session, options = {}) {
     ...(store.metadata(session).harness==='dsh'?{source_records:batch.filter(visibleEvent).map(e=>e.ordinal)}:{}) }
   const previous=done.filter(n=>n.last<base.first).at(-1)
   const task={...base,language,requireHeading:true,kind:'leaf',policy_version:SUMMARY_POLICY_VERSION,
+    reducedSources:batch.some(e=>hasUnrepresentedContent(store.exact(session,e.ordinal)))||batch.filter(visibleEvent).some(e=>recordText(e,budget)!==e.summaryText),
     ...(previous?{previousSummary:`[${previous.id}, events ${previous.first}-${previous.last}]\n${previous.summary}`}:{})}
   // The conversation's own AI, asked right after this part happened and with no compaction since, still has
   // it in context: send only where it starts and ends instead of the text again.
@@ -205,7 +207,7 @@ export function summaryWork(store, session, options = {}) {
     const digest = hash(JSON.stringify([SUMMARY_POLICY_VERSION,language.code,...batch.map(n => [n.id,n.digest,hash(n.summary)])]))
     const content = mergeContent(batch)
     if (content.length > MAX_SUMMARY_INPUT) throw new Error('Complete child summaries exceed the input limit; refusing to truncate them')
-    const task = { language, requireHeading:true, reducedSources:batch.some(n=>isReducedSummary(n.summary)), level, kind:'condensed', first:batch[0].first, last:batch.at(-1).last,
+    const task = { language, requireHeading:true, reducedSources:batch.some(n=>n.sourceIncomplete || isReducedSummary(n.summary)), level, kind:'condensed', first:batch[0].first, last:batch.at(-1).last,
       ...(budget.tokens?{targetTokens:Math.max(128,Math.min(1200,Math.floor(estimateSummaryTokens(content)/2)))}:{}) }
     const sources=store.metadata(session).harness==='dsh'?store.db.prepare('SELECT DISTINCT seq FROM dsh_node_sources WHERE session=? AND id IN ('+batch.map(()=>'?').join(',')+') ORDER BY seq').all(session,...batch.map(n=>n.id)).map(r=>r.seq):undefined
     return { session, batch_id: nodeId(session, level, task.first, task.last, digest), ...task, children: batch.map(n => n.id), digest,source_records:sources,
@@ -291,7 +293,7 @@ export async function buildHierarchy(store, session, { model, apiKey, baseURL, a
       checkLease()
       if (!mayContinue()){outcome='stopped';stopReason='settings-changed';return { session, created, stopped:stopReason }}
       verify()
-      store.addNode({ session, id: work.batch_id, level: work.level, first: work.first, last: work.last, children: work.children, summary, digest: work.digest, model,sourceRecords:work.source_records }, { leaseOwner: owner,validate:mayContinue })
+      store.addNode({ session, id: work.batch_id, level: work.level, first: work.first, last: work.last, children: work.children, summary, digest: work.digest, model,sourceComplete:!work.reducedSources,sourceRecords:work.source_records }, { leaseOwner: owner,validate:mayContinue })
       if (!store.renewLease(session, leaseDurationMs, owner)) throw new Error('Summary writer lost its lease')
       store.completeSummaryBatch(session,work.batch_id,revision)
       activeWork=null

@@ -83,7 +83,7 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
     'GET /api/conversation': url => { const id = session(url);refreshConversationNames(store,{env,session:id,minIntervalMs:nameRefreshMs});const health=summaryHealth(store,id,{env});return { ...store.outline(id), writer_tool: writerTool(store.metadata(id).harness, env), bands: store.bands(id), setting: store.effectiveSetting(id, env), summarizing: health.active||store.summarizing(id),summary_health:health,summary_runs:store.summaryRunHistory(id),status: store.source(id).status, last_compaction: store.lastCompactionDiagnostic(id), reduced_summary_count: store.reducedSummaryCount(id), summary_error_detail: store.source(id).status === 'summary_error' ? store.summaryError(id) : null, backends: backends(id), estimate: health.estimate } },
     'GET /api/outline': url => store.outline(session(url), url.searchParams.get('node') || undefined),
     'GET /api/events': url => { const id = session(url); return { source: store.metadata(id), events: store.eventPreviews(id, int(url.searchParams.get('from'), 0), int(url.searchParams.get('to'), 0)) } },
-    'GET /api/search': url => { refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});return store.find(url.searchParams.get('q') || '', { harness: url.searchParams.get('harness') || undefined, limit: 30,excludeRetired:true }) },
+    'GET /api/search': url => { refreshConversationNames(store,{env,minIntervalMs:nameRefreshMs});return store.find(url.searchParams.get('q') || '', { harness: url.searchParams.get('harness') || undefined, limit: 30,excludeRetired:true,cursor:url.searchParams.has('cursor')?Number(url.searchParams.get('cursor')):undefined }) },
     'GET /api/continue': url => { const id = session(url), packet = continuePacket(store, id); return { line: continueLine(packet.source), code: packet.source.code, name: shortName(packet.source.name), packet } },
     'POST /api/rename': async req => { const x = await body(req); if (!store.source(x.session)) throw new Error('Unknown conversation'); return store.nameSession(x.session, x.name) },
     'POST /api/summarize': async req => {
@@ -175,9 +175,14 @@ export async function startWeb({ store = new ClaudeStore(), port = 0, host = '12
         try { await probeModel({ model: m.model, apiKey: key || '', apiProvider: m.provider, apiURL: m.url, effort: m.effort }) }
         catch (error) { throw new Error('Test call failed: ' + String(error?.message || error).slice(0, 400)) }
       }
-      const saved = store.saveApiModel({ id: x.id || null, ...m })
-      if (key) saveApiKey(store.dir, 'model:' + saved.id, key, m.url)
-      else if (before && before.url !== m.url) removeApiKey(store.dir, 'model:' + saved.id)
+      let saved
+      store.db.exec('BEGIN IMMEDIATE')
+      try{
+        saved = store.saveApiModel({ id: x.id || null, ...m })
+        if (key) saveApiKey(store.dir, 'model:' + saved.id, key, m.url)
+        else if (before && before.url !== m.url) removeApiKey(store.dir, 'model:' + saved.id)
+        store.db.exec('COMMIT')
+      }catch(error){store.db.exec('ROLLBACK');throw error}
       return { ...saved, key_configured: store.hasApiCredential('model:' + saved.id), tested: x.skip_test !== true }
     },
     // 接管压缩 on/off and its size; turning it on also sets Claude Code's autoCompactWindow (see src/takeover.js).

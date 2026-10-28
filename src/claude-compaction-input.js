@@ -4,6 +4,7 @@ import { coveredThrough } from './compaction.js'
 import {claudeCheckpoints} from './claude-checkpoints.js'
 import {summaryToolPairing} from './summary-source.js'
 import {isRequestCopy} from './claude-records.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
 const prefix = 'This session is being continued from a previous conversation'
 const textOf = record => {
   const content = record?.message?.content??record?.content
@@ -13,7 +14,9 @@ export function verifiedCompactionInput(store, session, messages) {
   const nativeTexts = [], promptTexts = [], packets=[], promptOrigins=new Map(),turnOrigins=new Map()
   const through = coveredThrough([...store.nodeRows(session, 0),...claudeCheckpoints(store,session)]), all=store.eventRows(session)
   const opening=messages[0]?.text?.trim()||'',packetCandidate=opening.startsWith('<superlcm-context ')
-  const events=all.map(event=>{
+  const events=all.map(original=>{
+    const raw=store.exact(session,original.ordinal)
+    const event={...original,exactRaw:raw,sourceHasNonText:hasUnrepresentedContent(raw)}
     if(!event.preview.startsWith('user: ') && !(packetCandidate&&!event.preview))return event
     let record;try{record=JSON.parse(store.exact(session,event.ordinal))}catch{return {...event,humanPrompt:false}}
     if(isRequestCopy(record))return {...event,humanPrompt:false}

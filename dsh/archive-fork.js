@@ -85,7 +85,7 @@ export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=fa
   if(current?.provider!==request.provider||current?.model!==request.model)throw Error('聊天模型已变化，摘要未保存')
   const tree=parseForkTree(text,leaves,language,options),digest=forkHash([doc.revision,selected.map(r=>[r.seq,r.event])])
   const ids=tree.map(n=>'fork-'+forkHash([id,digest,n.index]).slice(0,24))
-  const nodes=tree.map(n=>({id:ids[n.index],level:n.level,first:leaves[0].sources[0],last:leaves.at(-1).sources.at(-1),children:n.children.map(i=>ids[i]),summary:n.summary,
+  const nodes=tree.map(n=>({id:ids[n.index],level:n.semanticLevel??n.level,kind:n.kind,modelSummary:n.modelSummary,first:leaves[0].sources[0],last:leaves.at(-1).sources.at(-1),children:n.children.map(i=>ids[i]),summary:n.summary,
     sources:leaves.filter(l=>l.firstMessage>=n.firstMessage&&l.lastMessage<=n.lastMessage).flatMap(l=>l.sources)}))
   service.db.saveTree(id,nodes,owner,doc.revision,()=>readSettings(service.file).revision,selected,{provider:route.request.provider,model:route.request.model,usage})
   await service.onTreeSaved?.(id,nodes)

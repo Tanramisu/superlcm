@@ -57,7 +57,7 @@ export function captureDshPacket(store, packet, {clientKind='hook',legacyCapture
     // A process can exit after the append but before its SQLite commit. Adopt only
     // complete, contiguous records; a damaged tail refuses further writes.
     if (size > bytes) {
-      if (size - bytes > (legacyCapture?34e6:32e6)) throw Error('DSH mirror recovery tail exceeds the capture batch limit')
+      if (size - bytes > 34e6) throw Error('DSH mirror recovery tail exceeds the capture batch limit')
       const tail = Buffer.alloc(size - bytes), fd = openSync(file, 'r')
       try {
         let read = 0
@@ -84,8 +84,8 @@ export function captureDshPacket(store, packet, {clientKind='hook',legacyCapture
       remember.run(session, next++, digest); added++
     }
     const text = pending.join('')
-    if (pending.some(line => Buffer.byteLength(line) > (legacyCapture?32:4) * 1024 * 1024)) throw Error('DSH event exceeds the archive 4 MiB record limit; capture paused')
-    if (Buffer.byteLength(text) > (legacyCapture?34e6:32e6)) throw Error('DSH capture batch exceeds 32 MB; split the batch')
+    if (pending.some(line => Buffer.byteLength(line) > 32 * 1024 * 1024)) throw Error('DSH event exceeds the archive 32 MiB record limit; capture paused')
+    if (Buffer.byteLength(text) > 34e6) throw Error('DSH capture batch exceeds 34 MB; split the batch')
     if (text) { appendFileSync(file, text, { mode: 0o600 }); bytes += Buffer.byteLength(text) }
     store.db.prepare('INSERT INTO dsh_mirrors VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET next_seq=excluded.next_seq,bytes=excluded.bytes').run(session, header, next, bytes)
     store.db.exec('COMMIT')

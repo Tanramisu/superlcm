@@ -37,10 +37,10 @@ export function makePiSnapshot(ctx, policy, settings = {}, {keepLimit=Infinity}=
     if(retain>=keep){desired=newer>0&&keep-newer<retain-keep?i+1:i;break}
   }
   if (desired === entries.length) return null
-  const pending = new Set(); let cut = -1
+  const pending = new Set(),safeCuts=[]; let cut = -1
   for (let i = 0; i <= desired; i++) {
     const e = entries[i], first = e.messages[0]
-    if (i > 0 && !pending.size && e.sourceEntry.type !== 'compaction' && ['user', 'assistant'].includes(first?.role)) cut = i
+    if (i > 0 && !pending.size && e.sourceEntry.type !== 'compaction' && ['user', 'assistant'].includes(first?.role)) {cut = i;safeCuts.push(i)}
     for (const message of e.messages) {
       // A persisted native human turn can abandon an interrupted old call.
       // Custom notifications cannot authorize that boundary.
@@ -50,6 +50,12 @@ export function makePiSnapshot(ctx, policy, settings = {}, {keepLimit=Infinity}=
     }
   }
   if (cut <= 0) return null
+  // The standalone text API cannot see binary/non-text content. Retain its
+  // entire message group instead of claiming that an archive notice is vision.
+  if(policy.summaryMode==='api'){
+    const unsupported=entries.slice(0,cut).findIndex(e=>e.messages.some(m=>Array.isArray(m.content)&&m.content.some(b=>!['text','toolCall','thinking','redactedThinking'].includes(b.type))))
+    if(unsupported>=0){cut=safeCuts.filter(i=>i<=unsupported).at(-1)??-1;if(cut<=0)return null}
+  }
   const messages = entries.slice(0, cut).flatMap(e => e.messages)
   if (!messages.some(m => !['compactionSummary', 'branchSummary'].includes(m.role))) return null
   const source = serializePiMessages(messages)

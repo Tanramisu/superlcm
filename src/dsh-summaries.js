@@ -4,6 +4,7 @@ import {legacyDshSource,archivePosition} from './dsh-evidence.js'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { jsonlTail } from './jsonl-tail.js'
+import {forkHash} from './fork-summary.js'
 import { semanticKind, semanticFrontier, semanticLevel } from '../dsh/tree-semantics.js'
 
 const hasTable = (db, name) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name)
@@ -158,9 +159,10 @@ export function syncDshSummaries(store, session, id) {
   // and source envelopes. Native nodes and original events remain immutable.
   store.db.exec('BEGIN IMMEDIATE')
   try {
-    store.db.prepare('UPDATE dsh_shared_nodes SET visible=0 WHERE session=?').run(session)
     const visibility = store.db.prepare('INSERT INTO dsh_shared_nodes VALUES(?,?,?) ON CONFLICT(session,id) DO UPDATE SET visible=excluded.visible')
-    for (const row of store.db.prepare("SELECT id FROM nodes WHERE session=? AND id LIKE 'dsh-native-%'").all(session)) visibility.run(session, row.id, 0)
+    // A newly prepared native-identity tree remains usable before its actual
+    // compaction commits. Only committed native rows can retire its members.
+    for (const row of rows) visibility.run(session,'dsh-native-'+row.node_id,0)
     const insert = store.db.prepare('INSERT OR IGNORE INTO dsh_node_sources VALUES(?,?,?)')
     for (const node of derived) {
       const { id: nodeId, level, first, last, children, summary, digest, model } = node
@@ -168,11 +170,17 @@ export function syncDshSummaries(store, session, id) {
       if (fresh.changes) store.db.prepare('INSERT INTO node_fts(session,id,summary) VALUES(?,?,?)').run(session, nodeId, summary)
       store.db.prepare('UPDATE nodes SET level=?,first=?,last=?,children=? WHERE session=? AND id=?').run(level, first, last, JSON.stringify(children), session, nodeId)
       visibility.run(session, nodeId, 1)
+      const legacyId='dsh-fork-'+forkHash([id,'fork-'+nodeId.slice(11)]).slice(0,24),legacy=store.node(session,legacyId)
+      if(legacy&&cleanLegacy(legacy.summary)===cleanLegacy(summary)){
+        const old=store.db.prepare('SELECT seq FROM dsh_node_sources WHERE session=? AND id=? ORDER BY seq').all(session,legacyId).map(r=>r.seq)
+        if(JSON.stringify(old)===JSON.stringify(node.seqs))visibility.run(session,legacyId,0)
+      }
       for (const seq of node.seqs) insert.run(session, nodeId, seq)
     }
     store.db.exec('COMMIT')
   } catch (error) { store.db.exec('ROLLBACK'); throw error }
 }
+const cleanLegacy=text=>String(text).replace(/^DSH native summary\. Exact selected source records:[^\n]*\n/,'')
 
 export function dshCoverage(store, session, records) {
   const db = store.db,legacy=legacyDshSource(db,session),categories = recordCategories(store, session, records), revisions = legacy?new Map():recordRevisions(store, session, records, categories)

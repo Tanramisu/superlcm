@@ -109,7 +109,7 @@ export class ArchiveDatabase {
     return {sequenceMode:'physical-order',items:rows.slice(0,count).map(x=>({seq:x.ordinal,sourceRow:x.sourceRow,sourceSeq:JSON.parse(x.event).seq,type:JSON.parse(x.event).type,text:x.event})),next:rows.length>count?rows[count].ordinal:null}
   }const rows=this.db.prepare('SELECT seq,event FROM sl_events WHERE session=? AND seq>=? ORDER BY seq LIMIT ?').all(sessionId(id),offset(from),limit(count)+1);return {items:rows.slice(0,count).map(x=>({seq:x.seq,type:JSON.parse(x.event).type,text:x.event})),next:rows.length>count?rows[count].seq:null}}
   sourceRows(id,from=0){return this.db.prepare('SELECT seq AS ordinal,seq,event,text,tokens FROM sl_events WHERE session=? AND seq>=? AND original=1 ORDER BY seq').all(sessionId(id),offset(from))}
-  nodes(id,level){return this.db.prepare('SELECT * FROM sl_nodes WHERE session=?'+(level===undefined?'':' AND level=?')+' ORDER BY first,createdAt').all(...(level===undefined?[sessionId(id)]:[sessionId(id),level])).map(node)}
+  nodes(id,level){return this.db.prepare('SELECT * FROM sl_nodes WHERE session=?'+(level===undefined?'':' AND level=?')+' ORDER BY first,createdAt').all(...(level===undefined?[sessionId(id)]:[sessionId(id),level])).map(row=>{const value=node(row);if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sl_node_native'").get())Object.assign(value,this.db.prepare('SELECT nativeId,kind FROM sl_node_native WHERE session=? AND id=?').get(id,value.id)||{});return value})}
   outline(id){const nodes=this.nodes(id),covered=new Set(nodes.filter(n=>n.level===0).flatMap(n=>n.sources)),rows=this.sourceRows(id),s=this.db.prepare('SELECT title FROM sl_sessions WHERE id=?').get(id);return {session:id,title:s?.title||id,nodes,total:rows.length,uncovered:rows.filter(e=>!covered.has(e.seq)).length}}
   find({session,query,offset:from=0,limit:count=20}={}){if(typeof query!=='string'||!query.trim()||query.length>500)throw Error('请输入搜索内容');const args=session?[sessionId(session),query,limit(count)+1,offset(from)]:[query,limit(count)+1,offset(from)]
     const rows=this.db.prepare(`SELECT * FROM (
@@ -133,6 +133,8 @@ export class ArchiveDatabase {
       for(const n of nodes){
         if(!n.sources.length)throw Error('摘要缺少原文范围')
         this.db.prepare('INSERT OR IGNORE INTO sl_nodes VALUES(?,?,?,?,?,?,?,?,?)').run(id,n.id,n.level,Math.min(...n.sources),Math.max(...n.sources),n.summary,JSON.stringify(n.children),JSON.stringify(n.sources),Date.now())
+        if(n.nativeId){this.db.exec('CREATE TABLE IF NOT EXISTS sl_node_native(session TEXT,id TEXT,nativeId TEXT,kind TEXT,PRIMARY KEY(session,id))');this.db.prepare('INSERT OR IGNORE INTO sl_node_native VALUES(?,?,?,?)').run(id,n.id,n.nativeId,n.kind||null)}
+        if(n.modelSummary){this.db.exec('CREATE TABLE IF NOT EXISTS sl_summary_variants(session TEXT,id TEXT,summary TEXT,PRIMARY KEY(session,id))');this.db.prepare('INSERT OR IGNORE INTO sl_summary_variants VALUES(?,?,?)').run(id,n.id,n.modelSummary)}
       }
       if(receipt){
         this.db.exec('CREATE TABLE IF NOT EXISTS sl_fork_receipts(session TEXT PRIMARY KEY,provider TEXT,model TEXT,usage TEXT NOT NULL,at_ms INTEGER NOT NULL)')

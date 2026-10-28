@@ -348,3 +348,39 @@ test('real DSH preserves recent originals with an oversized 80K retention prefer
   await checkpoint(h,{duplicate:false})
  }finally{await close(h)}
 })
+
+test('repeated main-model branches reuse old checkpoints and converge to one archive forest',async()=>{
+ const {ClaudeStore}=await import('../src/store.js'),{MainArchiveFork}=await import('../dsh/main-archive-fork.js'),{captureDshPacket,projectDshEvent}=await import('../src/dsh.js'),{markerFromSummary}=await import('../dsh/marker.js'),{nodeLevel}=await import('../dsh/core.js')
+ const h=await lab({capacity:64000,config:{summaryMode:'main-fork'}}),shared=new ClaudeStore(h.dir)
+ shared.setIntegrationEnabled('dsh',true);shared.setHarnessSetting('dsh','main-fork')
+ const archive=new MainArchiveFork(h.ctx,h.engine.superLcmStore,h.dir,error=>h.warnings.push(error.message)),frozen=[],depths=[]
+ const original=h.ctx.llm.stream.bind(h.ctx.llm)
+ h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+  const prompt=options.messages.at(-1).content.map(b=>b.text||'').join(''),plan=JSON.parse(prompt.split('\n').find(line=>line.startsWith('[{"index":')))
+  frozen.push(...plan.filter(p=>p.frozenSummary).map(p=>p.frozenSummary))
+  yield {type:'text-delta',index:0,text:JSON.stringify({blocks:plan.filter(p=>!p.frozenSummary).map(p=>({index:p.index,summary:p.level?'# Overview\nRecorded decisions remain active.':'# Historical decisions\nPreserve constraints, original evidence and pending inspection.'}))})}
+  yield {type:'finish',reason:{kind:'stop'}}
+ })()
+ let cursor=0
+ const sync=()=>{
+  archive.capture(h.agent.session.id)
+  const events=h.agent.session.snapshotEvents(),records=events.slice(cursor).map(e=>projectDshEvent(h.agent.session.id,e,''))
+  captureDshPacket(shared,{header:h.agent.session.header,records});cursor=events.length;archive.mirror(h.agent.session.id)
+ }
+ try{
+  for(let round=0;round<6;round++){
+   history(h,round===0?.72:.58,{pieces:10});sync()
+   assert.deepEqual(await send(h,'Continue audit round '+round),[])
+   await h.engine.settleBackgroundFold(h.agent)
+   assert.deepEqual(await send(h,'Keep the same decisions '+round+' '+'n'.repeat(26000)),[])
+   await h.engine.settleBackgroundFold(h.agent);sync()
+   const entries=h.agent.session.surface.nodes.map(seq=>h.agent.session.eventAt(seq)),marker=entries.map(e=>markerFromSummary(e.data?.content)).find(Boolean)
+   assert.ok(marker,JSON.stringify({round,warnings:h.warnings,state:h.engine.backgroundFolds.get(h.agent)?.status,usage:h.ctx.tokenMeter.measure(h.agent.session).totalTokens}));depths.push(nodeLevel(h.engine.superLcmStore,h.agent.session.id,marker.id))
+   const rows=shared.db.prepare('SELECT id,summary FROM nodes WHERE session=?').all('dsh-'+h.agent.session.id)
+   assert.ok(rows.every(n=>!n.id.startsWith('dsh-fork-')),'native and archive use the same identity')
+  }
+  assert.ok(frozen.length>=4,'later rounds must carry existing checkpoints without rewriting')
+  assert.ok(Math.max(...depths)<=3,'new compaction rounds alone must not add semantic layers: '+depths)
+  assert.ok(h.warnings.every(w=>!w.includes('祖先')&&!w.includes('分支摘要树不完整')&&!w.includes('changed')))
+ }finally{await archive.close();shared.close();await close(h)}
+})

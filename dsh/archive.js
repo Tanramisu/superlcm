@@ -101,7 +101,7 @@ export function apply(ctx,config={}) {
       }
       for (let index = incremental ? 0 : from; index < events.length; index++) {
         const record = projectEvent(id, events[index]), size = Buffer.byteLength(JSON.stringify(record))
-        if (size > 4 * 1024 * 1024) throw Error('DSH event exceeds the archive record limit at seq ' + events[index].seq)
+        if (size + 1 > 32 * 1024 * 1024) throw Error('DSH event exceeds the archive record limit at seq ' + events[index].seq)
         if (batch.length >= 500 || bytes + size > 24e6)if(!await flush())return
         batch.push(record); bytes += size
       }

@@ -48,10 +48,10 @@ export async function piForkPlan(snapshot, capture) {
   if(first!==selected.length)throw Error('Pi 选区存在未闭合工具组，保留原文')
   return plan
 }
-export async function summarizePiFork(ctx,snapshot,capture,{signal,stage,timeoutMs=600000}={}) {
-  return summaryAttempt(abort=>runPiFork(ctx,snapshot,capture,{signal:abort,stage,timeoutMs}),signal,timeoutMs)
+export async function summarizePiFork(ctx,snapshot,capture,{signal,stage,timeoutMs=600000,progress}={}) {
+  return summaryAttempt((abort,renew)=>runPiFork(ctx,snapshot,capture,{signal:abort,stage,timeoutMs,progress:()=>{renew();progress?.()}}),signal,timeoutMs)
 }
-async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = {}) {
+async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs, progress } = {}) {
   if (!capture?.payload || capture.model.provider !== ctx.model?.provider || capture.model.id !== ctx.model?.id) throw Object.assign(Error('Pi 尚未捕获当前模型的原始请求'),{code:'SUPERLCM_PI_CAPTURE_INVALID'})
   let model=capture.model
   if(snapshot.summaryModel){
@@ -79,7 +79,8 @@ async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = 
   const field = Array.isArray(capture.payload.messages) ? 'messages' : Array.isArray(capture.payload.input) ? 'input' : null
   if (!field) throw Error('当前 Pi 供应商没有可原样分支的请求数组')
   let sent = false, wirePrefix, wireSettings
-  const result = await summaryAttempt(abort => ctx.modelRegistry.streamSimple(model, { messages: [...branchMessages, { role: 'user', content: directive, timestamp: Date.now() }] }, {
+  const result = await summaryAttempt(async (abort,renew) => {
+    const stream=ctx.modelRegistry.streamSimple(model, { messages: [...branchMessages, { role: 'user', content: directive, timestamp: Date.now() }] }, {
     sessionId: snapshot.session_id, reasoning: capture.reasoning, signal: abort,
     onPayload(payload) {
       abort.throwIfAborted()
@@ -104,7 +105,13 @@ async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = 
       if (input >= finalLimit) throw Error('Pi 后台分支最终请求没有足够输入空间，原文保留')
       return replay
     }
-  }).result(), signal, timeoutMs)
+    })
+    if(typeof stream?.[Symbol.asyncIterator]==='function')for await(const event of stream){
+      abort.throwIfAborted()
+      if(['text_delta','thinking_delta'].includes(event.type)&&typeof event.delta==='string'&&event.delta.trim()){renew();progress?.()}
+    }
+    return stream.result()
+  }, signal, timeoutMs)
   signal?.throwIfAborted()
   if (!sent || result.stopReason !== 'stop' || result.content.some(block => block.type === 'toolCall')) throw Error('Pi 后台分支未完整结束，原文保留：'+String(result.errorMessage||result.stopReason||'缺少完成回执').slice(0,1000))
   // Planning allocates space across levels; it is not an exact tokenizer limit.

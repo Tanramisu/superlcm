@@ -171,7 +171,8 @@ async function runSearch() {
   $('#rows').innerHTML =
     (data.conversations.length ? '<div class="group-label">' + t('对话') + '</div>' + data.conversations.map(c => '<button type="button" class="row" data-id="' + esc(c.session) + '">' + mark(c.harness) + '<span class="name">' + hl(c.name) + '</span><span class="meta">#' + esc(c.code) + '</span></button>').join('') : '') +
     (hits.length ? '<div class="group-label">' + t('内容 · {n} 处', { n: hits.length }) + '</div>' + hits.map((h, i) => '<button type="button" class="hit" data-i="' + i + '"><span class="where">' + esc(h.where) + ' · ' + esc(h.c.name) + '</span><span class="snip">' + hl(h.text) + '</span></button>').join('') : '') +
-    (!data.conversations.length && !hits.length ? '<div class="empty">' + t('未找到「{q}」', { q: esc(query) }) + '</div>' : '')
+    (data.search_complete===false ? '<div class="group-label">'+t('原文搜索尚未完成，请缩小到一个对话后继续检索。')+'</div>' : '') +
+    (!data.conversations.length && !hits.length && data.search_complete!==false ? '<div class="empty">' + t('未找到「{q}」', { q: esc(query) }) + '</div>' : '')
   $('#listCount').textContent = t('搜索结果')
   $('#more').hidden = true
   for (const b of $('#rows').querySelectorAll('.row')) b.onclick = () => select(b.dataset.id)

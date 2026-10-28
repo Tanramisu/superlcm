@@ -1,4 +1,8 @@
 import { migrateSummaryModes } from './summary-migration.js'
+import {privateDirectory,privateFile} from './private-path.js'
+import {summarySource} from './summary-source.js'
+import {hasUnrepresentedContent} from './source-completeness.js'
+import {estimateSummaryTokens} from './summary-tokens.js'
 import { initializeEventCounts } from './event-counts.js'
 import { codexHeadlessRecord, codexHeadlessStatus } from './codex.js'
 import { initializeSummaryRuns, latestSummaryRun, summaryRunHistory, recoverSummaryRuns } from './summary-runs.js'
@@ -22,7 +26,7 @@ export const maxFile = 4 * 1024 * 1024 * 1024 // read in 64 KiB pieces, so the s
 export const maxRecord = 32 * 1024 * 1024 // Codex compacted records can contain an entire replacement history.
 // Preserve the existing index path; both Claude and Codex must point at the same home.
 export const home = () => resolve(process.env.SUPERLCM_HOME || process.env.SUPERLCM_CLAUDE_HOME || join(homedir(), '.superlcm-claude'))
-function ensurePrivate(path) { mkdirSync(path, { recursive: true, mode: 0o700 }) }
+const ensurePrivate=privateDirectory
 function inside(parent, child) { const rel = relative(parent, child); return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) }
 export function claudeTranscript(path, env = process.env) {
   const root = realpathSync(resolve(env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects'))
@@ -68,6 +72,8 @@ export class ClaudeStore {
   constructor(dir = home()) {
     this.dir = resolve(dir)
     ensurePrivate(this.dir)
+    privateFile(join(this.dir,'lcm.sqlite'))
+    for(const suffix of ['-wal','-shm'])if(existsSync(join(this.dir,'lcm.sqlite'+suffix)))privateFile(join(this.dir,'lcm.sqlite'+suffix))
     this.db = new DatabaseSync(join(this.dir, 'lcm.sqlite'))
     this.db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;')
     this.db.exec(`
@@ -78,6 +84,7 @@ export class ClaudeStore {
       CREATE TABLE IF NOT EXISTS nodes(session TEXT NOT NULL, id TEXT NOT NULL, level INTEGER NOT NULL, first INTEGER NOT NULL, last INTEGER NOT NULL, children TEXT NOT NULL, summary TEXT NOT NULL, digest TEXT NOT NULL, model TEXT NOT NULL, PRIMARY KEY(session,id));
       CREATE INDEX IF NOT EXISTS nodes_level ON nodes(session,level,first);
       CREATE INDEX IF NOT EXISTS nodes_coverage ON nodes(session,last);
+      CREATE TABLE IF NOT EXISTS summary_node_quality(session TEXT,id TEXT,complete INTEGER NOT NULL,PRIMARY KEY(session,id));
       CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(session UNINDEXED, id UNINDEXED, summary);
       CREATE TABLE IF NOT EXISTS leases(session TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS summary_retries(session TEXT PRIMARY KEY,batch_id TEXT NOT NULL,revision TEXT NOT NULL,attempts INTEGER NOT NULL,until_ms INTEGER NOT NULL);
@@ -521,7 +528,7 @@ export class ClaudeStore {
     return out
   }
   // Substring search (works for CJK) across one or all conversations.
-  find(query, {session, harness, limit=20,excludeRetired=false}={}) {
+  find(query, {session, harness, limit=20,excludeRetired=false,cursor}={}) {
     const cap=bounded(limit,20,50)
     if (query===undefined || query==='') {
       const list=this.listSessions(cap,0,harness,'all',excludeRetired)
@@ -533,8 +540,23 @@ export class ClaudeStore {
     const args=session?[session]:harness?[harness]:[]
     const conversations=session?[]:this.resolve(query).filter(m=>(!harness||m.harness===harness)&&(!excludeRetired||m.harness!=='hermes')).slice(0,10)
     const summaries=this.db.prepare(`SELECT x.session,x.id,x.level,x.first,x.last,x.summary FROM nodes x WHERE x.summary LIKE ? ESCAPE '\\' AND ${dshVisibleNodes(this.db,'x')}${scope} ORDER BY x.level DESC,x.first DESC LIMIT ?`).all(like,...args,cap).map(r=>({...r,conversation:this.metadata(r.session)}))
-    const events=this.db.prepare(`SELECT x.session,x.ordinal,x.preview FROM events x WHERE x.preview LIKE ? ESCAPE '\\'${scope} ORDER BY x.rowid DESC LIMIT ?`).all(like,...args,cap).map(r=>{const i=r.preview.toLowerCase().indexOf(query.trim().toLowerCase());return {session:r.session,ordinal:r.ordinal,snippet:r.preview.slice(Math.max(0,i-120),i+240),conversation:this.metadata(r.session)}})
-    return {query,conversations,summaries,events}
+    const originals=this.searchOriginals(query,{scope,args,cap,cursor})
+    return {query,conversations,summaries,...originals}
+  }
+  searchOriginals(query,{scope='',args=[],cap=20,cursor}={}) {
+    if(cursor!==undefined&&(!Number.isSafeInteger(cursor)||cursor<=0))throw Error('Invalid original search cursor')
+    const rows=this.db.prepare(`SELECT x.rowid AS search_id,x.session,x.ordinal FROM events x WHERE 1=1${scope}${cursor?' AND x.rowid<?':''} ORDER BY x.rowid DESC LIMIT 2001`).all(...args,...(cursor?[cursor]:[]))
+    const needle=query.trim().toLowerCase(),events=[],errors=[];let bytes=0,visited=0,next=null
+    for(const row of rows){
+      if(visited>=2000||bytes>=64*1024*1024||events.length>=cap){next=row.search_id+1;break}
+      visited++
+      try{
+        const raw=this.exact(row.session,row.ordinal);bytes+=Buffer.byteLength(raw)
+        const text=summarySource(raw,this.source(row.session).kind)+'\n'+raw,index=text.toLowerCase().indexOf(needle)
+        if(index>=0)events.push({session:row.session,ordinal:row.ordinal,snippet:text.slice(Math.max(0,index-120),index+240),conversation:this.metadata(row.session)})
+      }catch(error){errors.push({session:row.session,ordinal:row.ordinal,error:String(error.message).slice(0,150)})}
+    }
+    return {events,search_complete:next===null&&!errors.length,next_cursor:next,...(errors.length?{search_errors:errors}:{}),searched_records:visited}
   }
   summaries(session, limit=10, offset=0) {
     const source=this.metadata(session)
@@ -774,15 +796,30 @@ export class ClaudeStore {
   }
   eventRows(session) { return this.db.prepare('SELECT ordinal,digest,preview FROM events WHERE session=? ORDER BY ordinal').all(session) }
   eventRowsFrom(session, start) { return this.db.prepare('SELECT ordinal,digest,preview FROM events WHERE session=? AND ordinal>=? ORDER BY ordinal').all(session, start) }
-  nodeRows(session, level) { return this.db.prepare("SELECT n.* FROM nodes n WHERE n.session=? AND n.level=? AND n.id NOT LIKE 'dsh-native-%' ORDER BY n.first").all(session, level) }
+  nodeRows(session, level) { return this.db.prepare("SELECT n.* FROM nodes n WHERE n.session=? AND n.level=? AND n.id NOT LIKE 'dsh-native-%' ORDER BY n.first").all(session, level).map(n=>({...n,sourceIncomplete:this.nodeSourceIncomplete(session,n)})) }
+  nodeSourceIncomplete(session,node,seen=new Set()) {
+    if(seen.has(node.id))return true
+    const known=this.db.prepare('SELECT complete FROM summary_node_quality WHERE session=? AND id=?').get(session,node.id)
+    if(known)return known.complete!==1
+    const children=typeof node.children==='string'?JSON.parse(node.children):node.children||[]
+    const next=new Set([...seen,node.id])
+    if(children.length)return children.some(id=>{const child=this.node(session,id);return !child||this.nodeSourceIncomplete(session,child,next)})
+    const tuning=this.tuning(),budget=tuning.target_tokens||Math.floor(tuning.target_chars/4)
+    for(let i=node.first;i<=node.last;i++){
+      const raw=this.exact(session,i)
+      if(hasUnrepresentedContent(raw)||estimateSummaryTokens(summarySource(raw,this.source(session).kind))>budget)return true
+    }
+    return false
+  }
   node(session, id) { return this.db.prepare('SELECT * FROM nodes WHERE session=? AND id=?').get(session, id) }
   addNode(node, { leaseOwner,validate } = {}) {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       if (leaseOwner && !this.ownsLease(node.session, leaseOwner)) throw new Error('Summary writer lost its lease; result not saved')
       if(validate&&!validate())throw Error('Summary setting changed; result not saved')
-      this.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(node.session,node.id,node.level,node.first,node.last,JSON.stringify(node.children),node.summary,node.digest,node.model)
-      if (this.db.prepare('SELECT changes() AS n').get().n) this.db.prepare('INSERT INTO node_fts(session,id,summary) VALUES(?,?,?)').run(node.session,node.id,node.summary)
+      const inserted=this.db.prepare('INSERT OR IGNORE INTO nodes VALUES(?,?,?,?,?,?,?,?,?)').run(node.session,node.id,node.level,node.first,node.last,JSON.stringify(node.children),node.summary,node.digest,node.model)
+      this.db.prepare('INSERT OR IGNORE INTO summary_node_quality VALUES(?,?,?)').run(node.session,node.id,node.sourceComplete===false?0:1)
+      if (inserted.changes) this.db.prepare('INSERT INTO node_fts(session,id,summary) VALUES(?,?,?)').run(node.session,node.id,node.summary)
       if(node.sourceRecords) {
         this.db.exec('CREATE TABLE IF NOT EXISTS dsh_node_sources(session TEXT NOT NULL,id TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(session,id,seq))')
         const insert=this.db.prepare('INSERT OR IGNORE INTO dsh_node_sources VALUES(?,?,?)')
@@ -816,7 +853,7 @@ export class ClaudeStore {
     const cap = bounded(limit, 10, 50)
     return {
       source:this.metadata(session),
-      events: this.db.prepare('SELECT e.session,e.ordinal,substr(e.preview,1,500) AS snippet FROM event_fts f JOIN events e ON e.session=f.session AND e.ordinal=f.ordinal WHERE event_fts MATCH ? AND f.session=? ORDER BY e.ordinal DESC LIMIT ?').all(q,session,cap),
+      ...this.searchOriginals(query,{scope:' AND x.session=?',args:[session],cap}),
       nodes: this.db.prepare('SELECT n.id,n.level,n.first,n.last,n.summary FROM node_fts f JOIN nodes n ON n.session=f.session AND n.id=f.id WHERE node_fts MATCH ? AND f.session=? AND '+dshVisibleNodes(this.db)+' ORDER BY n.level DESC,n.first DESC LIMIT ?').all(q,session,cap)
     }
   }
@@ -824,7 +861,8 @@ export class ClaudeStore {
     const node = this.node(session,id)
     if (!node) throw new Error('Unknown node')
     const parents = this.db.prepare('SELECT n.id FROM nodes n WHERE n.session=? AND '+dshVisibleNodes(this.db)+' AND EXISTS (SELECT 1 FROM json_each(n.children) WHERE value=?) ORDER BY n.level LIMIT 20').all(session,node.id).map(r=>r.id)
-    return { ...node, source:this.metadata(session), children: JSON.parse(node.children), parents }
+    const variant=this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='fork_parent_variants'").get()?this.db.prepare('SELECT summary FROM fork_parent_variants WHERE session=? AND id=?').get(session,id)?.summary:null
+    return { ...node, source:this.metadata(session), children: JSON.parse(node.children), parents,...(variant?{model_variant:variant}:{} ) }
   }
   expand(session, id, ordinal, charOffset = 0, maxChars = 12000) {
     const node = this.node(session,id)
