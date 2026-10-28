@@ -58,6 +58,7 @@ function ask(ctx, event) {
   if (!sessionId) return Promise.resolve({});
   return new Promise(resolve => {
     const child = spawn(NODE, [CLI, "pi-hook", "--home", HOME], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+    child.stdout.setEncoding("utf8");
     let out = "";
     const timer = setTimeout(() => { try { child.kill(); } catch {} resolve({}); }, 10000);
     child.stdout.on("data", d => { out += d; });
@@ -70,6 +71,7 @@ function ask(ctx, event) {
 // Minimal MCP client over stdio for the SuperLcm server.
 function mcpClient() {
   const proc = spawn(NODE, [CLI, "mcp"], { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, SUPERLCM_HOME: HOME }, windowsHide: true });
+  proc.stdout.setEncoding("utf8");
   let buf = "", id = 0; const waiting = new Map();
   proc.stdout.on("data", d => { buf += d; let i; while ((i = buf.indexOf("\\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); try { const m = JSON.parse(line); const w = waiting.get(m.id); if (w) { waiting.delete(m.id); m.error ? w.reject(new Error(m.error.message)) : w.resolve(m.result); } } catch {} } });
   proc.on("exit", () => { for (const w of waiting.values()) w.reject(new Error("SuperLcm MCP server exited")); waiting.clear(); });

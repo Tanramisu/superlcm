@@ -141,7 +141,9 @@ const preparedSchema = store => store.db.exec('CREATE TABLE IF NOT EXISTS pi_pre
 export async function preparePi(store, input, options) {
   if(typeof input.draftKey!=='string'||!/^[a-f0-9]{64}$/.test(input.draftKey))throw Error('Pi 后台摘要缺少快照标识')
   preparedSchema(store)
-  const old=readPreparedPi(store,input,{env:options?.env})
+  // An explicit freshly validated fork must be able to repair a rejected
+  // cached draft; a lookup-only retry may still reuse the saved result.
+  const old=input.forkSummary?null:readPreparedPi(store,input,{env:options?.env})
   if(old)return old
   const compaction=await compactPi(store,input,options),session=compaction.details.session
   preparedSchema(store)

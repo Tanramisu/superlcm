@@ -191,7 +191,7 @@ test('Pi retries independently past fifty minutes and keeps pressure waiting unt
  }finally{r.handlers.get('session_shutdown')();release();t.mock.timers.reset();await waiting}
 })
 
-for(const cancel of ['user','session','model','endpoint','settings','source'])test('Pi retry backoff cancels on '+cancel,async t=>{
+for(const cancel of ['user','session','fork','tree','model','endpoint','settings','source'])test('Pi retry backoff cancels on '+cancel,async t=>{
  let calls=0
  const p=mainForkPolicy()
  const r=runtime({readPolicy:()=>p,responder:async()=>null,fork:async()=>{calls++;throw Error('transport')}})
@@ -202,6 +202,8 @@ for(const cancel of ['user','session','model','endpoint','settings','source'])te
   assert.equal(calls,1)
   if(cancel==='user')controller.abort(Error('user stopped'))
   else if(cancel==='session')r.handlers.get('session_before_switch')()
+  else if(cancel==='fork')r.handlers.get('session_before_fork')()
+  else if(cancel==='tree')r.handlers.get('session_tree')()
   else if(cancel==='model'){r.ctx.model.id='new-model';r.handlers.get('model_select')({},r.ctx)}
   else if(cancel==='endpoint'){r.ctx.model.baseUrl='http://127.0.0.1:1';r.handlers.get('model_select')({},r.ctx)}
   else if(cancel==='settings')p.ratio=.5
@@ -209,6 +211,22 @@ for(const cancel of ['user','session','model','endpoint','settings','source'])te
   await tick();t.mock.timers.tick(10000000);await tick()
   assert.equal(calls,1);assert.equal(r.api.getState(),null)
  }finally{r.handlers.get('session_shutdown')();t.mock.timers.reset()}
+})
+
+test('Pi a model switch releases the old capacity waiter without cancelling the new draft',async()=>{
+ const r=runtime();let settled=false
+ try{
+  await turn(r);r.ctx.tokens=95000
+  const old=turn(r).then(()=>{settled=true})
+  await tick()
+  r.ctx.model.id='new-model';r.ctx.tokens=70000
+  r.handlers.get('model_select')({},r.ctx)
+  const next=r.api.getState()
+  await until(()=>settled)
+  assert.equal(r.api.getState(),next)
+  await r.complete();await old
+  assert.ok(r.api.getState()?.ready)
+ }finally{r.handlers.get('session_shutdown')()}
 })
 
 test('Pi capacity pause preserves background retries but a later user abort stops them',async t=>{
@@ -400,6 +418,28 @@ test('snapshot never leaves a pending tool invocation on the discarded side', ()
   const snapshot = makePiSnapshot(r.ctx, { enabled: true, ratio: .8 }, { compaction: { keepRecentTokens: 2048 } })
   assert.notEqual(snapshot?.firstKeptEntryId, 'result')
 })
+for(const kind of ['text','image'])test('Pi can prepare past an oversized old '+kind+' instead of retaining the entire conversation',()=>{
+ const r=runtime()
+ r.rows[0].messages[0].content=kind==='image'?[{type:'image',mimeType:'image/png',data:'original'}]:'old evidence '.repeat(20000)
+ for(const e of r.rows.slice(1))e.messages[0].content='Recent small message.'
+ const snapshot=makePiSnapshot(r.ctx,{enabled:true,ratio:.8,keep:5000},{})
+ assert.ok(snapshot)
+ assert.equal(snapshot.firstKeptEntryId,'a1')
+ assert.ok(snapshot.sourceTokens>estimateSummaryTokens(snapshot.source)||(kind==='text'&&snapshot.sourceTokens>50000))
+})
+for(const native of [true,false])test('Pi interrupted tools '+(native?'close at a later native human turn':'remain pending across a custom notification'),async()=>{
+ const r=runtime()
+ r.rows[1].messages[0].content=[{type:'toolCall',id:'abandoned',name:'bash',arguments:{}}]
+ r.rows[2].sourceEntry.type=native?'message':'custom_message'
+ const snapshot=makePiSnapshot(r.ctx,{enabled:true,ratio:.8},{compaction:{keepRecentTokens:512}})
+ assert.equal(snapshot.firstKeptEntryId,native?'a2':'a1')
+ if(native){
+  const {piForkPlan}=await import('../src/pi-fork.js')
+  const full=makePiSnapshot(r.ctx,{enabled:true,ratio:.8,summaryMode:'main-fork'},{compaction:{keepRecentTokens:512}})
+  const plan=await piForkPlan(full,{messages:r.rows.flatMap(e=>e.messages)})
+  assert.ok(plan.length);assert.equal(plan.at(-1).lastMessage,2)
+ }
+})
 test('durable prepared lookup is read-only, works after appended raw records and invalidates changed models', async t => {
   const f = fixture(t); let generated = 0
   f.input.draftKey = 'a'.repeat(64)
@@ -418,6 +458,78 @@ test('durable prepared lookup is read-only, works after appended raw records and
 test('Pi subprocess cancellation rejects without a model or orphaned child', async () => {
   const controller = new AbortController(); controller.abort()
   await assert.rejects(piCompactRequest({ node: process.execPath, script: '/missing', home: '/missing' }, {}, controller.signal), /取消/)
+})
+test('Pi worker preserves UTF-8 characters split between stdout chunks',async t=>{
+ const f=fixture(t),script=join(f.dir,'split-output.mjs')
+ const prepared={compaction:{summary:'# 历史状态\n中文与表情😀必须逐字保留。'}}
+ writeFileSync(script,`const data=Buffer.from(${JSON.stringify(JSON.stringify({prepared}))});const cut=data.indexOf(Buffer.from('中'))+1;process.stdin.resume();process.stdin.on('end',()=>{process.stdout.write(data.subarray(0,cut));setTimeout(()=>process.stdout.end(data.subarray(cut)),30)});`)
+ assert.deepEqual(await piCompactRequest({node:process.execPath,script,home:f.dir,command:'pi-ready'},{},new AbortController().signal),prepared)
+})
+
+test('Pi cancellation reaps a worker that ignores SIGTERM',async t=>{
+ const f=fixture(t),script=join(f.dir,'stubborn-worker.mjs'),marker=join(f.dir,'pid')
+ writeFileSync(script,`import{writeFileSync}from'node:fs';process.on('SIGTERM',()=>{});writeFileSync(${JSON.stringify(marker)},String(process.pid));process.stdin.resume();setInterval(()=>{},1000);`)
+ const controller=new AbortController()
+ const work=piCompactRequest({node:process.execPath,script,home:f.dir},{},controller.signal)
+ const outcome=assert.rejects(work,/取消/)
+ let pid
+ for(let i=0;i<200;i++){try{pid=Number(readFileSync(marker,'utf8'));break}catch{};await new Promise(resolve=>setTimeout(resolve,5))}
+ assert.ok(pid);controller.abort();await outcome
+ let alive=true
+ for(let i=0;i<200;i++){try{process.kill(pid,0)}catch{alive=false;break};await new Promise(resolve=>setTimeout(resolve,5))}
+ assert.equal(alive,false)
+})
+
+test('Pi cold resume may restore a ready draft without a captured provider request',async()=>{
+ const r=runtime({tokens:80000,readPolicy:mainForkPolicy,responder:async(opts,snap)=>opts.command==='pi-ready'?{compaction:{summary,firstKeptEntryId:'a2'}}:null})
+ r.ctx.model.maxTokens=50000
+ try{
+  await turn(r)
+  assert.equal(r.commands.filter(c=>c==='pi-ready').length,2)
+  assert.ok(r.api.getState()?.ready)
+ }finally{r.handlers.get('session_shutdown')()}
+})
+
+test('Pi cold resume without a draft can capture recovery before blocking the provider',async()=>{
+ let calls=0
+ const r=runtime({tokens:80000,readPolicy:mainForkPolicy,responder:async()=>null,fork:async()=>{calls++;return new Promise(()=>{})}})
+ r.ctx.model.maxTokens=50000
+ const controller=new AbortController();r.ctx.signal=controller.signal;r.ctx.abort=()=>controller.abort()
+ try{
+  assert.equal(await r.handlers.get('input')({text:'CONTINUE AFTER RESTART'},r.ctx),undefined)
+  captureRuntime(r)
+  await until(()=>calls===1)
+  assert.equal(controller.signal.aborted,true)
+  assert.ok(r.api.getState(),'capacity abort retains the recovery job')
+ }finally{r.handlers.get('session_shutdown')()}
+})
+
+test('Pi automatic native compaction cannot install a prepared summary before its configured ratio',async()=>{
+ const r=runtime()
+ try{
+  await turn(r);await r.complete()
+  const event={reason:'threshold',preparation:{tokensBefore:70000}}
+  assert.deepEqual(await r.handlers.get('session_before_compact')(event,r.ctx),{cancel:true})
+  assert.ok((await r.handlers.get('session_before_compact')({...event,reason:'manual'},r.ctx)).compaction)
+  r.ctx.tokens=80000
+  assert.ok((await r.handlers.get('session_before_compact')(event,r.ctx)).compaction)
+ }finally{r.handlers.get('session_shutdown')()}
+})
+
+test('Pi does not loop on an invalid restored result instead of regenerating it',async t=>{
+ let calls=0,prepared
+ const r=runtime({readPolicy:mainForkPolicy,responder:async(opts,snap)=>{
+  if(opts.command==='pi-ready')return prepared||{compaction:{summary:'invalid restored text',firstKeptEntryId:'a2'}}
+  if(opts.command==='pi-stage')return {revision:'staged'}
+  return prepared={compaction:{summary,firstKeptEntryId:snap.firstKeptEntryId}}
+ },fork:async(_ctx,_snap,_capture,{stage})=>{calls++;await stage();return {blocks:[],tree:[]}}})
+ try{
+  t.mock.timers.enable({apis:['setTimeout','Date']});captureRuntime(r)
+  await until(()=>r.api.getState()?.retryAt)
+  t.mock.timers.tick(r.api.getState().retryAt-Date.now())
+  await until(()=>r.api.getState()?.ready)
+  assert.equal(calls,1)
+ }finally{r.handlers.get('session_shutdown')();t.mock.timers.reset()}
 })
 test('Pi takeover is opt-in and malformed policies fail closed', t => {
   const f = fixture(t)
@@ -479,6 +591,11 @@ for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'
   assert.equal(f.store.nodeRows('pi-pi-test',1).length,1)
   assert.deepEqual(await preparePi(f.store,input,options),prepared)
   assert.deepEqual(readPreparedPi(f.store,input,{env:f.env}),prepared)
+  const obsolete={...prepared.compaction,summary:'# Obsolete prepared result\n'+'pending '.repeat(20000)}
+  f.store.db.prepare('UPDATE pi_prepared_compactions SET compaction=? WHERE session=? AND draft_key=?').run(JSON.stringify(obsolete),'pi-pi-test',input.draftKey)
+  assert.equal(readPreparedPi(f.store,input,{env:f.env}).compaction.summary,obsolete.summary)
+  const repaired=await preparePi(f.store,input,options)
+  assert.equal(repaired.compaction.summary,prepared.compaction.summary,'a fresh valid fork can replace an unusable saved draft')
  }
 })
 

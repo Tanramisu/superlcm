@@ -1,5 +1,6 @@
 import { dirname, join } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { findCli } from './runtime.js'
 import { forkHash, forkAnchors, forkDirective, parseForkTree } from './fork-summary.js'
@@ -23,12 +24,13 @@ export async function piForkPlan(snapshot, capture) {
   // Every selected message must be the exact beginning of the captured main
   // transcript after system messages. Changed context extensions are blocked.
   const indices = visible.flatMap((message, index) => message.role === 'system' ? [] : [index])
-  if (selected.length > indices.length || selected.some((message, i) => serializePiMessages([message]) !== serializePiMessages([visible[indices[i]]]))) throw Error('Pi 原始请求与归档选区不同，无法原样分支')
-  const mapped=[]
+  if (selected.length > indices.length || selected.some((message, i) => !isDeepStrictEqual(message,visible[indices[i]]))) throw Error('Pi 原始请求与归档选区不同，无法原样分支')
+  const mapped=[],humanIndices=new Set()
   if(snapshot.sourceEntryIds){
     const individual=[]
     for(let i=0;i<snapshot.sourceMessages.length;i++){
       const part=await convert([snapshot.sourceMessages[i]])
+      if(snapshot.sourceMessages[i].role==='user')humanIndices.add(individual.length)
       individual.push(...part);mapped.push(...part.map(()=>snapshot.sourceEntryIds[i]))
     }
     if(serializePiMessages(individual)!==serializePiMessages(selected))throw Error('Pi 消息映射不兼容，原文保留')
@@ -37,7 +39,7 @@ export async function piForkPlan(snapshot, capture) {
   for (let i = 0; i < selected.length; i++) {
     tokens += estimateSummaryTokens(serializePiMessages([selected[i]]))
     const pairing=summaryToolPairing(JSON.stringify({type:'message',message:selected[i]}))
-    if(pairing.endsTurn)pending.clear()
+    if(pairing.endsTurn||humanIndices.has(i))pending.clear()
     for(const id of pairing.opened)pending.add(id);for(const id of pairing.closed)pending.delete(id)
     if(pending.size)continue
     if (tokens < (snapshot.summaryTuning?.targetTokens||20000) && i < selected.length - 1) continue
@@ -68,11 +70,16 @@ async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = 
   let images = 0
   const encoded = JSON.stringify(capture.messages, (_key,value) => { if(value?.type === 'image'){images++;return {type:'image'}};return value })
   const limit = model.contextWindow - 1024 - Math.max(1024,model.contextWindow*.02)
-  if (Number.isFinite(limit) && Math.max(snapshot.tokensBefore,estimateSummaryTokens(encoded)+images*8192) + estimateSummaryTokens(directive) >= limit) throw Error('Pi 后台分支没有足够输入空间，原文保留')
+  const prefixOnly=Number.isFinite(limit)&&Math.max(snapshot.tokensBefore,estimateSummaryTokens(encoded)+images*8192)+estimateSummaryTokens(directive)>=limit
+  // A resumed near-full session may not fit the retained tail plus a directive.
+  // Branch at the already selected history boundary instead. Every summarized
+  // message stays intact; the unsummarized tail remains in the foreground.
+  const branchMessages=prefixOnly?capture.messages.slice(0,plan.at(-1).lastMessage+1):capture.messages
+  const fixed=prefixOnly?Math.max(0,snapshot.tokensBefore-estimatePiRequest(capture.payload)):0
   const field = Array.isArray(capture.payload.messages) ? 'messages' : Array.isArray(capture.payload.input) ? 'input' : null
   if (!field) throw Error('当前 Pi 供应商没有可原样分支的请求数组')
   let sent = false, wirePrefix, wireSettings
-  const result = await summaryAttempt(abort => ctx.modelRegistry.streamSimple(model, { messages: [...capture.messages, { role: 'user', content: directive, timestamp: Date.now() }] }, {
+  const result = await summaryAttempt(abort => ctx.modelRegistry.streamSimple(model, { messages: [...branchMessages, { role: 'user', content: directive, timestamp: Date.now() }] }, {
     sessionId: snapshot.session_id, reasoning: capture.reasoning, signal: abort,
     onPayload(payload) {
       abort.throwIfAborted()
@@ -81,19 +88,25 @@ async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = 
       sent = true
       // Replay all native settings, tools, cache controls and original wire
       // messages. Only append the provider-converted final user instruction.
-      let replay = override ? payload : { ...structuredClone(capture.payload), [field]: [...structuredClone(capture.payload[field]), payload[field].at(-1)] }
-      const available=model.contextWindow-Math.max(snapshot.tokensBefore,estimatePiRequest(replay))-Math.max(1024,model.contextWindow*.02)-1
+      const generatedPrefix=payload[targetField].slice(0,-1)
+      let leading=0
+      if(prefixOnly&&!['system','developer'].includes(generatedPrefix[0]?.role))while(['system','developer'].includes(capture.payload[field][leading]?.role))leading++
+      const nativePrefix=prefixOnly?capture.payload[field].slice(0,leading+generatedPrefix.length):capture.payload[field]
+      if(prefixOnly&&!override&&!isDeepStrictEqual(nativePrefix.slice(leading),generatedPrefix))throw Error('Pi 较早分支与原始请求前缀不一致，原文保留')
+      let replay = override ? payload : { ...structuredClone(capture.payload), [field]: [...structuredClone(nativePrefix), payload[field].at(-1)] }
+      const input=prefixOnly?estimatePiRequest(replay)+fixed:Math.max(snapshot.tokensBefore,estimatePiRequest(replay))
+      const available=model.contextWindow-input-Math.max(1024,model.contextWindow*.02)-1
       if(available<1)throw Error('Pi 后台分支最终请求没有足够输入空间，原文保留')
       replay=limitPiOutput(replay,model,available)
       const finalLimit=model.contextWindow-piOutputReserve(replay,model)-Math.max(1024,model.contextWindow*.02)
       if(!Number.isFinite(finalLimit)||finalLimit<=0)throw Error('Pi 摘要模型缺少有效输入容量，原文保留')
       wirePrefix=replay[targetField].slice(0,-1);wireSettings=Object.fromEntries(Object.entries(replay).filter(([key])=>key!==targetField))
-      if (estimatePiRequest(replay) >= finalLimit) throw Error('Pi 后台分支最终请求没有足够输入空间，原文保留')
+      if (input >= finalLimit) throw Error('Pi 后台分支最终请求没有足够输入空间，原文保留')
       return replay
     }
   }).result(), signal, timeoutMs)
   signal?.throwIfAborted()
-  if (!sent || result.stopReason !== 'stop' || result.content.some(block => block.type === 'toolCall')) throw Error('Pi 后台分支未完整结束，原文保留')
+  if (!sent || result.stopReason !== 'stop' || result.content.some(block => block.type === 'toolCall')) throw Error('Pi 后台分支未完整结束，原文保留：'+String(result.errorMessage||result.stopReason||'缺少完成回执').slice(0,1000))
   // Planning allocates space across levels; it is not an exact tokenizer limit.
   // Persist the sent output limit so the archive worker revalidates the same
   // tree without imposing the smaller prompt goal a second time. The installed

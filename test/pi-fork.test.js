@@ -63,6 +63,14 @@ test('Pi refuses transformed source, incomplete output and tool-call summary',as
  assert.throws(()=>parseForkSummary('{"blocks":[]}',[{index:0}]),/缺失/)
 })
 
+test('Pi refuses changed image content even when visible text is identical',async()=>{
+ const image={role:'user',content:[{type:'text',text:'Inspect the image.'},{type:'image',mimeType:'image/png',data:'original'}],timestamp:1}
+ const changed={...image,content:[image.content[0],{...image.content[1],data:'changed'}]}
+ const ctx={model:capture.model,modelRegistry:{streamSimple(){throw Error('must not dispatch a changed source')}}}
+ await assert.rejects(summarizePiFork(ctx,{...snapshot,sourceMessages:[image]},
+  {...capture,messages:[messages[0],changed]},{stage:async()=>{}}),/归档选区/)
+})
+
 for (const fault of ['cancel', 'timeout']) test('Pi bounds a branch whose provider ignores '+fault,async()=>{
  let release,started,wireOptions
  const blocked=new Promise(resolve=>{release=resolve}),begun=new Promise(resolve=>{started=resolve})
@@ -109,6 +117,21 @@ test('a late Pi branch at 400K keeps its exact prefix and reduces only auxiliary
  assert.equal(captured.model.maxTokens,128000);assert.equal(captured.payload.max_tokens,128000)
  assert.deepEqual(wire.messages.slice(0,-1),payload.messages)
  assert.deepEqual({...wire,messages:[],max_tokens:128000},{...captured.payload,messages:[]})
+})
+
+test('Pi branches at an earlier complete history boundary when the full retained tail cannot fit',async()=>{
+ const tail={role:'user',content:'UNSUMMARIZED RECENT TAIL '.repeat(200),timestamp:3}
+ const captured={...capture,model:{...capture.model,contextWindow:16000},messages:[...messages,tail],payload:{...payload,messages:[...payload.messages,{role:'user',content:tail.content}]}}
+ let wire
+ const ctx={model:captured.model,modelRegistry:{streamSimple(_m,context,options){
+  assert.deepEqual(context.messages.slice(0,-1),messages)
+  wire=options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:context.messages.at(-1).content}]})
+  return {result:async()=>({stopReason:'stop',content:[{type:'text',text:'# State\nInspection remains pending. Never deploy.'}]})}
+ }}}
+ const result=await summarizePiFork(ctx,{...snapshot,tokensBefore:14500},captured,{stage:async()=>{}})
+ assert.deepEqual(wire.messages.slice(0,-1),captured.payload.messages.slice(0,-1))
+ assert.equal(captured.messages.at(-1).content,tail.content)
+ assert.equal(result.prefixHash,forkHash(payload.messages))
 })
 
 test('Pi attempt deadline includes a stuck archive stage and fences its late continuation',async()=>{

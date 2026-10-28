@@ -61,6 +61,8 @@ Pi and DSH ratios use the full model context window: a 500K window prepares at 3
 
 Pi treats the whole-tree target in the prompt as a planning goal. A complete tree may exceed that goal within the actual request output limit; its root is independently checked against the replacement budget. Retry status retains the last failure reason while a new attempt runs.
 
+On a near-full Pi resume, SuperLcm first looks for a prepared result. If a new capture is needed, it captures the request before blocking its delivery and prepares a background branch. When the full conversation leaves no room for the directive, it may branch at the selected earlier history boundary; complete messages and the unsummarized tail remain preserved. Capacity recovery can reduce the recent-original target. After this cold recovery installs the summary, submit “continue” to resume the saved request.
+
 ## Optional compaction takeover for Claude Code
 
 Claude Code takeover uses its configured replacement threshold, 300K tokens by default, with preparation scheduled before that threshold. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.

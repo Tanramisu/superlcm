@@ -15,9 +15,11 @@ import { piOutputReserve } from '../src/pi-request.js'
 import { estimateSummaryTokens } from '../src/summary-tokens.js'
 const mainFork = process.argv.includes('--main-fork')
 const overGoal=process.argv.includes('--over-planning-target')
+const earlyNative=process.argv.includes('--early-native-compaction')
+const imageHistory=process.argv.includes('--image-history'),modelInput=imageHistory?['text','image']:['text']
 const fullWindow=process.argv.includes('--full-window'),scale=fullWindow?5:1,window=100000*scale,maxTokens=fullWindow?128000:1024
 const otherModel=process.argv.includes('--other-model'), ratio50=process.argv.includes('--ratio50')
-assert.ok(!(otherModel||ratio50||overGoal)||mainFork,'native model/ratio fixtures require --main-fork')
+assert.ok(!(otherModel||ratio50||overGoal||earlyNative||imageHistory)||mainFork,'native model/ratio fixtures require --main-fork')
 const passive = process.argv.includes('--passive-only')
 const live = process.argv.includes('--live-luna'), dir = mkdtempSync(join(tmpdir(), 'superlcm-pi-background-'))
 const slow = process.argv.includes('--slow-luna'), fail = process.argv.includes('--fail-luna'), cold = process.argv.includes('--cold-input')
@@ -44,6 +46,7 @@ const { fauxAssistantMessage, fauxToolCall } = await import(pathToFileURL(join(a
 const archive = new ClaudeStore(join(dir, 'archive'))
 let server, mainServer, faultTimer, branchSummaryBudget, apiCalls = 0, session, mainCalls = 0, readyApiCalls, swapApiCalls, swapEntry, abortedNativeCalls = 0, transportCalls = 0
 const mainPayloads = [], branchPayloads = []
+const statuses=[],lifecycle=[]
 let mainStartedResolve
 const mainStarted = new Promise(resolve => { mainStartedResolve = resolve })
 try {
@@ -78,7 +81,8 @@ try {
       content=JSON.stringify({blocks});tokens=500
       if(malformed)content='invalid JSON from synthetic summary provider'
     }else{
-      mainPayloads.push(body);mainCalls++;mainStartedResolve();tool=mainCalls< (slow?2:3)
+      mainPayloads.push(body);mainCalls++;mainStartedResolve();tool=!(cold&&mainFork)&&mainCalls< (slow?2:3)
+      if(cold&&mainFork){assert.ok(swapEntry,'cold recovery must install the background summary before any main HTTP request');assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'),'cold recovery must keep the original request in the actual provider context')}
       if(mainCalls=== (slow?2:3)){if(!passive)assert.ok(swapEntry);assert.ok(raw.includes('LATE_USER_REQUEST_KEEP_VERBATIM'));assert.ok(raw.includes('LATE_TOOL_RESULT_KEEP_VERBATIM'))}
       tokens=(mainCalls===1?(slow||fail||badSummary?95000:(ratio50?49000:79000)):tool?(ratio50?51000:81000):1100)*scale
       content=tool?null:'合成测试正常结束。'
@@ -116,23 +120,29 @@ try {
   archive.setHarnessSetting('pi', 'api', null, null, null, model.id); archive.setIntegrationEnabled('pi', true)
   savePiPolicy(archive, { enabled: !passive, ratio: ratio50?.5:.8, ...(mainFork?{summaryMode:'main-fork'}:{}) })
   writeFileSync(join(agentDir, 'extensions/superlcm.ts'), piExtension({ node: process.execPath, script: fileURLToPath(new URL('../src/cli.js', import.meta.url)), home: archive.dir }))
+  if(mainFork&&cold)writeFileSync(join(agentDir,'extensions/99-wire.ts'),`import{writeFileSync}from'node:fs';export default function(pi){pi.on('before_provider_request',event=>{writeFileSync(${JSON.stringify(join(dir,'cold-main-wire.json'))},JSON.stringify(event.payload))})}`)
   if(nativeFault||nativeOutput)writeFileSync(join(agentDir,'extensions/00-native-fault.ts'), `export default function(pi){pi.on('before_provider_request',event=>({...event.payload,${nativePayload?"tools:[{type:'function',function:{name:'oversized_tool',description:'中'.repeat(120000),parameters:{type:'object',properties:{}}}}]":"max_tokens:90000"}}))}`)
   const manager = sdk.SessionManager.create(cwd, sessions)
   const usage = tokens => ({ input: tokens - 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
   for (let i = 0; i < 8; i++) {
-    manager.appendMessage({ role: 'user', content: `请检查第 ${i} 处。部署必须另行获得用户明确授权。` + '保留准确路径和失败原因。'.repeat(fullWindow?400:40), timestamp: Date.now() })
-    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: `第 ${i} 处尚未结束。` + '路径为 /tmp/synthetic-project，工具结果回查原文。'.repeat(fullWindow?120:12) }], api: 'openai-completions', provider: 'fixture-main', model: 'scripted-main', usage: usage((cold ? 95000 : ratio50?40000:70000)*scale), stopReason: 'stop', timestamp: Date.now() })
+    const text=`请检查第 ${i} 处。部署必须另行获得用户明确授权。` + '保留准确路径和失败原因。'.repeat(fullWindow?400:40)
+    manager.appendMessage({ role: 'user', content: imageHistory&&i===0?[{type:'text',text},{type:'image',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jN3cAAAAASUVORK5CYII='}]:text, timestamp: Date.now() })
+    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: `第 ${i} 处尚未结束。` + '路径为 /tmp/synthetic-project，工具结果回查原文。'.repeat(fullWindow?120:12) }], api: 'openai-completions', provider: 'fixture-main', model: 'scripted-main', usage: usage((cold ? mainFork&&!fullWindow?90000:95000 : ratio50?40000:70000)*scale), stopReason: 'stop', timestamp: Date.now() })
   }
   const original = readFileSync(manager.getSessionFile(), 'utf8')
-  const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1, keepRecentTokens: 512 }, enableAnalytics: false, enableInstallTelemetry: false })
+  const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: earlyNative?Math.floor(window*.4):1, keepRecentTokens: 512 }, enableAnalytics: false, enableInstallTelemetry: false })
   const loader = new sdk.DefaultResourceLoader({ cwd, agentDir, settingsManager, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true })
   await loader.reload(); assert.deepEqual(loader.getExtensions().errors, [])
   const modelsFile=join(agentDir,'models.json')
   if(mainFork){
-    writeFileSync(modelsFile,JSON.stringify({providers:{'fixture-main':{baseUrl:`http://127.0.0.1:${mainServer.address().port}/v1`,api:'openai-completions',apiKey:'synthetic-no-credential',models:[...(otherModel?[{id:'scripted-summary',name:'Scripted summary',reasoning:false,input:['text'],contextWindow:window,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]:[]),{id:'scripted-main',name:'Scripted main',reasoning:false,input:['text'],contextWindow:window,maxTokens,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}))
+    writeFileSync(modelsFile,JSON.stringify({providers:{'fixture-main':{baseUrl:`http://127.0.0.1:${mainServer.address().port}/v1`,api:'openai-completions',apiKey:'synthetic-no-credential',models:[...(otherModel?[{id:'scripted-summary',name:'Scripted summary',reasoning:false,input:modelInput,contextWindow:window,maxTokens:1024,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]:[]),{id:'scripted-main',name:'Scripted main',reasoning:false,input:modelInput,contextWindow:window,maxTokens,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}))
   }
   if(otherModel)archive.setHarnessSetting('pi','main-fork','fixture-main/scripted-summary')
   const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: mainFork?modelsFile:null, refreshOnCreate: false })
+  if(mainFork&&cold){
+    const stream=modelRuntime.streamSimple.bind(modelRuntime)
+    modelRuntime.streamSimple=(model,context,options)=>stream(model,context,{...options,onPayload(payload){try{return options.onPayload(payload)}catch(error){writeFileSync(join(dir,'cold-branch-wire.json'),JSON.stringify(payload));throw error}}})
+  }
   // Isolated scripted provider: no real credential or chat endpoint is used.
   const hasAuth = modelRuntime.hasConfiguredAuth.bind(modelRuntime)
   modelRuntime.hasConfiguredAuth = provider => provider === 'fixture-main' || hasAuth(provider)
@@ -150,7 +160,7 @@ try {
     return { content: [{ type: 'text', text: 'LATE_TOOL_RESULT_KEEP_VERBATIM' + (huge ? '巨'.repeat(120000) : '') }], details: {} }
   } }
   const result = await sdk.createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime, customTools: [checkpoint],
-    model: { id: 'scripted-main', name: 'Scripted test model', api: 'openai-completions', provider: 'fixture-main', baseUrl: `http://127.0.0.1:${mainServer.address().port}/v1`, reasoning: false, input: ['text'], contextWindow: window, maxTokens, cost: usage(1000).cost } })
+    model: { id: 'scripted-main', name: 'Scripted test model', api: 'openai-completions', provider: 'fixture-main', baseUrl: `http://127.0.0.1:${mainServer.address().port}/v1`, reasoning: false, input: modelInput, contextWindow: window, maxTokens, cost: usage(1000).cost } })
   session = result.session
   const nativeStream = session.agent.streamFunction
   if(!mainFork) session.agent.streamFunction = (_model, context, options) => {
@@ -176,11 +186,22 @@ try {
     queueMicrotask(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: message.stopReason, message }); stream.end(message) })
     return stream
   }
-  session.subscribe(event => { if (event.type === 'entry_appended' && event.entry.type === 'compaction') { swapEntry = event.entry; swapApiCalls = apiCalls } })
-  await session.bindExtensions({onError:error=>console.error('Fixture extension error:',error.message),uiContext:{notify:text=>console.error('Fixture notice:',text),setStatus:()=>{}}})
+  session.subscribe(event => {if(['agent_settled','compaction_start','compaction_end'].includes(event.type))lifecycle.push({type:event.type,aborted:event.aborted,errorMessage:event.errorMessage});if (event.type === 'entry_appended' && event.entry.type === 'compaction') { swapEntry = event.entry; swapApiCalls = apiCalls };if(event.type==='compaction_end'&&event.result){swapEntry=manager.getEntries().findLast(e=>e.type==='compaction');swapApiCalls=apiCalls} })
+  await session.bindExtensions({onError:error=>console.error('Fixture extension error:',error.message),uiContext:{notify:text=>console.error('Fixture notice:',text),setStatus:(_key,text)=>statuses.push(text)}})
   assert.ok(session.getActiveToolNames().includes('lcm_read'))
   await session.prompt('LATE_USER_REQUEST_KEEP_VERBATIM：继续检查，禁止部署。' + (largeInput ? '中'.repeat(120000) : ''))
-  if(passive){
+  if(mainFork&&cold){
+    const deadline=Date.now()+20000
+    while(!swapEntry&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20))
+    if(!swapEntry)console.error(JSON.stringify({directory:dir,statuses,lifecycle,apiCalls,mainCalls}))
+    assert.ok(swapEntry,'a cold over-capacity session must recover without an initial capture')
+    assert.equal(mainCalls,0);assert.equal(apiCalls,1)
+    assert.ok(readFileSync(manager.getSessionFile(),'utf8').includes('LATE_USER_REQUEST_KEEP_VERBATIM'))
+    await session.prompt('Resume the preserved request after recovery.')
+    assert.equal(mainCalls,1)
+    const receipt={ok:true,mode:'cold-native-recovery',installedPi:JSON.parse(readFileSync(join(packageRoot,'package.json'))).version,directory:dir,mainRequestsBeforeReplacement:0,summaryCalls:apiCalls,fullOriginalPreserved:readFileSync(manager.getSessionFile(),'utf8').startsWith(original),foregroundResumed:true}
+    writeFileSync(join(dir,'receipt.json'),JSON.stringify(receipt,null,2)+'\n');console.log(JSON.stringify(receipt))
+  }else if(passive){
     assert.equal(swapEntry,undefined);assert.equal(apiCalls,1);assert.equal(mainCalls,3)
     const receipt=archive.db.prepare('SELECT * FROM fork_summary_receipts WHERE session=?').get(key)
     assert.ok(receipt);assert.ok(archive.db.prepare('SELECT COUNT(*) AS n FROM nodes WHERE session=?').get(key).n>0)
@@ -214,13 +235,14 @@ try {
     if(nativeOutput&&!fullWindow)assert.equal(piOutputReserve(main),18000)
   }
   assert.ok(swapEntry); assert.equal(swapEntry.details.backgroundPrepared, true); assert.equal(swapEntry.details.model, mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model)
+  if(earlyNative)assert.ok(swapEntry.tokensBefore>=window*(ratio50?.5:.8),'native automatic compaction must not bypass the configured replacement threshold')
   assert.equal(swapEntry.details.replacementModelCalls, 0); assert.equal(swapEntry.fromExtension ?? swapEntry.fromHook, true)
   if (!live && !slow) assert.equal(swapApiCalls - readyApiCalls, 0, 'replacement must not call the summary API')
   assert.equal(mainCalls, slow ? 2 : 3); assert.ok(readFileSync(manager.getSessionFile(), 'utf8').startsWith(original))
   assert.ok(archive.eventRows(key).map(row => archive.exact(key, row.ordinal)).join('').startsWith(original))
   const receipt = { ok: true, directory: dir, installedPi: JSON.parse(readFileSync(join(packageRoot, 'package.json'))).version, backgroundAt: ratio50?'40%':'70%', replacedAt: ratio50?'50%':'80%', mainContinuedDuringPreparation: true,
     mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal',contextWindow:window,configuredMaxTokens:maxTokens,effectiveMaxTokens:mainFork?piOutputReserve(mainPayloads[0]):undefined, uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
-    nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true,...(overGoal?{branchSummaryBudget}:{}) }
+    nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true,...(overGoal?{branchSummaryBudget}:{}),...(earlyNative?{earlyNativeCompactionRespected:true}:{}) }
   writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
   }
 } finally {

@@ -1,6 +1,7 @@
 import {cappedRecentKeep} from './recent-retention.js'
 import { createHash } from 'node:crypto'
 import { estimateSummaryTokens } from './summary-tokens.js'
+import { estimatePiRequest } from './pi-request.js'
 
 export const piDigest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 // Keep complete text and tool failure evidence. Binary content remains archived.
@@ -14,6 +15,7 @@ export function serializePiMessages(messages) {
   return messages.map((m, i) => `[Pi message ${i}; ${m.role}; ${m.isError ? 'ERROR / failed' : 'read result for outcome'}${m.toolCallId ? '; toolCallId=' + m.toolCallId : ''}]\n${m.summary || blocks(m.content)}`).join('\n\n')
 }
 const view = entries => entries.map(e => ({ id: e.sourceEntry.id, messages: e.messages }))
+export const estimatePiMessages=messages=>Math.max(estimateSummaryTokens(serializePiMessages(messages)),estimatePiRequest(messages))
 export const snapshotPrefix = (entries, index) => piDigest(view(entries.slice(0, index)))
 export function piSignature(ctx, policy, settings = {}) {
   return piDigest([policy, ctx.model?.provider, ctx.model?.id, ctx.model?.contextWindow, ctx.model?.maxTokens, ctx.model?.api, ctx.model?.baseUrl, settings.thinkingLevel, settings.compaction])
@@ -24,18 +26,25 @@ export function snapshotMatches(snapshot, entries, signature) {
 }
 // Only cut before a user/assistant message with no pending tool results. This
 // also supports a long autonomous turn without splitting an invocation/result pair.
-export function makePiSnapshot(ctx, policy, settings = {}) {
+export function makePiSnapshot(ctx, policy, settings = {}, {keepLimit=Infinity}={}) {
   const entries = ctx.sessionManager.buildSessionProjection().entries
-  const sizes = entries.map(e => estimateSummaryTokens(serializePiMessages(e.messages)))
-  const keep = policy.keep === undefined ? Math.max(512, settings.compaction?.keepRecentTokens ?? 20000) : cappedRecentKeep(policy.keep, sizes.reduce((a,b)=>a+b,0))
+  const sizes = entries.map(e => estimatePiMessages(e.messages))
+  const requestedKeep = policy.keep === undefined ? Math.max(512, settings.compaction?.keepRecentTokens ?? 20000) : cappedRecentKeep(policy.keep, sizes.reduce((a,b)=>a+b,0))
+  const keep=Math.min(requestedKeep,keepLimit)
   let retain = 0, desired = entries.length
-  for (let i = entries.length - 1; i >= 0; i--) { retain += sizes[i]; if (retain >= keep) { desired = i; break } }
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const newer=retain;retain+=sizes[i]
+    if(retain>=keep){desired=newer>0&&keep-newer<retain-keep?i+1:i;break}
+  }
   if (desired === entries.length) return null
   const pending = new Set(); let cut = -1
   for (let i = 0; i <= desired; i++) {
     const e = entries[i], first = e.messages[0]
     if (i > 0 && !pending.size && e.sourceEntry.type !== 'compaction' && ['user', 'assistant'].includes(first?.role)) cut = i
     for (const message of e.messages) {
+      // A persisted native human turn can abandon an interrupted old call.
+      // Custom notifications cannot authorize that boundary.
+      if(e.sourceEntry.type==='message'&&message.role==='user')pending.clear()
       if (message.role === 'assistant') for (const block of message.content || []) if (block.type === 'toolCall') pending.add(block.id)
       if (message.role === 'toolResult') pending.delete(message.toolCallId)
     }
@@ -52,6 +61,7 @@ export function makePiSnapshot(ctx, policy, settings = {}) {
     session_id: ctx.sessionManager.getSessionId(), session_file: ctx.sessionManager.getSessionFile(),
     leafId: ctx.sessionManager.getLeafId(), firstKeptEntryId: entries[cut].sourceEntry.id,
     tokensBefore: ctx.getContextUsage()?.tokens || sizes.reduce((a, b) => a + b, 0), source, protectedRequest,
+    sourceTokens:estimatePiMessages(messages),
     ...(policy.summaryMode === "main-fork" ? {summaryModel:policy.summaryModel||null,sourceMessages: messages,sourceEntryIds:entries.slice(0,cut).flatMap(e=>e.messages.map(()=>e.sourceEntry.id)),summaryTuning:{targetTokens:policy.targetTokens||20000,fanout:policy.fanout||4}} : {}),
     prefixDigest: snapshotPrefix(entries, cut), signature: piSignature(ctx, policy, settings),
   }
