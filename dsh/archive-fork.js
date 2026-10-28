@@ -12,6 +12,7 @@ import {completeSummaryStream} from './summary-session.js'
 import {detectSummaryLanguage} from '../src/summary-language.js'
 import {readSettings} from './settings.js'
 import {archivePairing} from './archive-planner.js'
+import {DSH_SUMMARY_TIMEOUT_MS} from './summary-timeout.js'
 const listeners=new Map()
 export function registerForkArchive(path,callback,revision=()=>null){
   const callbacks=listeners.get(path)||new Map();callbacks.set(callback,revision);listeners.set(path,callbacks)
@@ -35,7 +36,7 @@ export function registerArchiveCapture(service){
   })
 }
 export async function summarizeArchiveFork(service,id,doc,owner,signal,{force=false}={}){
-  signal=AbortSignal.any([signal,AbortSignal.timeout(180000)])
+  signal=AbortSignal.any([signal,AbortSignal.timeout(DSH_SUMMARY_TIMEOUT_MS)])
   const request=service.forkRequests.get(id),session=service.ctx.sessions.get(id)
   if(!request||!session)return 'awaiting-live-request'
   const info=await abortable(service.ctx.llm.resolveModelInfo(request.provider,request.model,signal),signal)

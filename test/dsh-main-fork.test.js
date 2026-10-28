@@ -3,6 +3,53 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {lab,history,send,close,count,checkpoint,until} from './reliability/lab.mjs'
 import {forkScope} from '../dsh/main-fork.js'
+import {ROLLING_DEFAULTS} from '../dsh/engine-config.js'
+import {controlsConfig} from '../dsh/controls-config.js'
+
+for(const stalled of [false,true])test('native fork '+(stalled?'still stops at its longer deadline':'can finish after the former three-minute deadline'),async t=>{
+ const deadline=controlsConfig({auto:true,summaryMode:'main-fork'}).summaryTimeoutMs
+ assert.equal(deadline,ROLLING_DEFAULTS.summaryTimeoutMs)
+ assert.equal(deadline,600000)
+ assert.equal(controlsConfig({auto:true,summaryMode:'main-fork',summaryTimeoutMs:120000}).summaryTimeoutMs,120000)
+ const h=await lab({capacity:500000,config:{summaryMode:'main-fork',summaryTimeoutMs:deadline}})
+ let release,branchSignal,branches=0
+ const barrier=new Promise(resolve=>release=resolve),original=h.ctx.llm.stream.bind(h.ctx.llm)
+ try{
+  history(h,.72)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches++;branchSignal=options.signal
+   await barrier
+   const directive=options.messages.at(-1).content.map(b=>b.text||'').join('')
+   const plan=JSON.parse(directive.split('\n').find(line=>line.startsWith('[{"index":')))
+   yield {type:'text-delta',index:0,text:JSON.stringify({blocks:plan.map(n=>({index:n.index,summary:'# Historical state\nOriginal records preserve constraints and pending work.'}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  t.mock.timers.enable({apis:['setTimeout']})
+  await send(h,'CURRENT INPUT MUST REMAIN VERBATIM')
+  assert.equal(branches,1)
+  assert.equal(h.main.length,1,'normal requests continue while a background fork is preparing')
+  t.mock.timers.tick(180001)
+  await Promise.resolve()
+  assert.equal(branchSignal.aborted,false,'the old deadline must not cancel a large fork')
+  assert.equal(h.engine.backgroundFolds.get(h.agent)?.status,'summarizing')
+  if(stalled){
+   t.mock.timers.tick(deadline)
+   await h.engine.settleBackgroundFold(h.agent)
+   assert.equal(branchSignal.aborted,true)
+   assert.equal(h.engine.backgroundFolds.get(h.agent),undefined)
+   assert.ok(h.warnings.some(s=>s.includes('timed out')))
+   assert.equal(count(h,'compaction/summary'),0)
+  }else{
+   release();await h.engine.settleBackgroundFold(h.agent)
+   assert.equal(h.engine.backgroundFolds.get(h.agent)?.status,'ready',h.warnings.join('\n'))
+   await send(h,'LATE INPUT '+ 't'.repeat(200000))
+   assert.equal(count(h,'compaction/summary'),1,h.warnings.join('\n'))
+   assert.equal(branches,1,'replacement reuses the finished fork')
+  }
+  assert.ok(h.agent.session.deriveMessages().some(m=>JSON.stringify(m).includes('CURRENT INPUT MUST REMAIN VERBATIM')))
+ }finally{release?.();t.mock.timers.reset();await close(h)}
+})
+
 for(const failure of [false,true])test('real DSH main branch: '+(failure?'summary failure blocks capacity':'one background call, source blocks and append-only replacement'),async()=>{
  const h=await lab({capacity:64000,config:{summaryMode:'main-fork',summaryTimeoutMs:300,summaryRetryCooldownMs:1000}})
  try {
