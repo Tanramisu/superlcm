@@ -4,12 +4,40 @@ import assert from 'node:assert/strict'
 import { summarizePiFork } from '../src/pi-fork.js'
 import { forkHash, parseForkSummary } from '../src/fork-summary.js'
 import { estimatePiRequest, limitPiOutput, piCompletionBudget, piOutputReserve, piWindowSafety } from '../src/pi-request.js'
+import { estimateSummaryTokens } from '../src/summary-tokens.js'
 const first={role:'user',content:'Please inspect /tmp/fixture; never deploy.',timestamp:1}
 const second={role:'assistant',content:[{type:'text',text:'Inspection pending.'}],timestamp:2}
 const messages=[{role:'system',content:'System',toolsAdded:[{name:'read',parameters:{type:'object'}}]},first,second]
 const payload={model:'fixture',messages:[{role:'system',content:'System'},{role:'user',content:first.content},{role:'assistant',content:'Inspection pending.'}],tools:[{type:'function',function:{name:'read'}}],max_tokens:2048,prompt_cache_key:'main-session',temperature:.2}
 const snapshot={session_id:'main-session',sourceMessages:[first,second],source:'source',tokensBefore:10000}
 const capture={payload,messages,model:{provider:'fixture',id:'fixture',contextWindow:1000000,maxTokens:2048},reasoning:'high'}
+for(const excess of [.01,.07])test('Pi accepts a complete tree '+Math.round(excess*100)+'% above its planning goal within the sent output limit',async()=>{
+ let goal,actual,output
+ const ctx={model:capture.model,modelRegistry:{streamSimple(_m,_c,options){
+  const prompt=_c.messages.at(-1).content
+  goal=Number(prompt.match(/together must fit (\d+) tokens/)[1])
+  const wire=options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:prompt}]})
+  output=piOutputReserve(wire,capture.model)
+  const summary='# Historical state\n'+'x'.repeat(Math.ceil(goal*(1+excess))*4)
+  actual=estimateSummaryTokens(summary)
+  assert.ok(actual>goal&&actual<output)
+  return {result:async()=>({stopReason:'stop',content:[{type:'text',text:JSON.stringify({blocks:[{index:0,summary}]})}],usage:{cacheRead:9000}})}
+ }}}
+ const result=await summarizePiFork(ctx,snapshot,capture,{stage:async()=>{}})
+ assert.equal(result.treeOptions.targetTokens,output,'save-time validation receives the actual output limit')
+ assert.equal(estimateSummaryTokens(result.tree[0].summary),actual)
+ assert.equal(result.usage.cacheRead,9000)
+})
+
+test('Pi still rejects a complete tree beyond its final output limit',async()=>{
+ const ctx={model:capture.model,modelRegistry:{streamSimple(_m,_c,options){
+  const wire=options.onPayload({...payload,messages:[...payload.messages,{role:'user',content:'directive'}]})
+  const summary='# Historical state\n'+'x'.repeat((piOutputReserve(wire,capture.model)+1)*4)
+  return {result:async()=>({stopReason:'stop',content:[{type:'text',text:JSON.stringify({blocks:[{index:0,summary}]})}]})}
+ }}}
+ await assert.rejects(summarizePiFork(ctx,snapshot,capture,{stage:async()=>{}}),/总输出预算/)
+})
+
 test('Pi branch replays exact provider prefix/settings and stages originals before one model call',async()=>{
  let staged=false,calls=0,wire
  const ctx={model:capture.model,modelRegistry:{streamSimple(model,context,options){

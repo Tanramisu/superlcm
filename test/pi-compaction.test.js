@@ -176,8 +176,11 @@ test('Pi retries independently past fifty minutes and keeps pressure waiting unt
    await until(()=>r.api.getState()?.retryAt)
    assert.equal(settled,false)
    const current=r.api.getState();assert.equal(current.attempt,n)
+   assert.equal(current.lastFailure.attempt,n)
+   assert.ok(current.lastFailure.message)
    t.mock.timers.tick(current.retryAt-Date.now())
    await until(()=>captures.length===n+1)
+   if(n<5)assert.equal(r.api.getState().lastFailure.attempt,n,'starting a retry keeps the last failure')
   }
   const result=await waiting
   assert.equal(result.entries[0].type,'compaction')
@@ -440,6 +443,43 @@ test('Pi main-fork stores provider usage and blocks without touching the indepen
   savePiPolicy(f.store,{enabled:true,ratio:.9,summaryMode:'main-fork'})
   assert.equal(readPreparedPi(f.store,input,{env:f.env}),null)
   await assert.rejects(preparePi(f.store,input,options),/设置已变化/)
+})
+
+for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'rejects '+fault:'retains an over-goal tree and reuses it without regeneration'),async t=>{
+ const {forkHash,forkTreePlan}=await import('../src/fork-summary.js')
+ const f=fixture(t)
+ f.entries[1].message.content='Original request: preserve the source and pending inspection. '.repeat(2000)
+ f.input.source=serializePiMessages(f.entries.slice(1,3).map(e=>e.message))
+ writeFileSync(f.input.session_file,f.entries.map(JSON.stringify).join('\n')+'\n')
+ savePiPolicy(f.store,{enabled:true,ratio:.8,summaryMode:'main-fork'})
+ const leaves=[{index:0,firstMessage:1,lastMessage:1,entryIds:['a'],summary},
+  {index:1,firstMessage:2,lastMessage:2,entryIds:['b'],summary}]
+ const tree=forkTreePlan(leaves).map(n=>({...n,summary:n.level?'# Current state\nInspection remains pending. Preserve all original evidence.':n.summary}))
+ if(fault==='root')tree.at(-1).summary='# Current state\n'+'pending inspection '.repeat(5000)
+ const total=estimateSummaryTokens(tree.map(n=>n.summary).join('\n'))
+ const goal=Math.floor(total/1.07),limit=fault==='tree'?total-1:Math.max(1024,total+1)
+ if(fault==='missing')tree.pop()
+ const staged=stagePi(f.store,f.input,{env:f.env})
+ const input={...f.input,draftKey:'b'.repeat(64),forkRevision:staged.revision,forkSummary:{
+  model:'fixture-main',provider:'fixture',sourceDigest:forkHash(f.input.source),prefixHash:'prefix',requestSettingsHash:'settings',usage:{cacheRead:9000},
+  blocks:leaves,tree,treeOptions:{fanout:4,targetTokens:limit}}}
+ const options={env:f.env,summarize:async()=>{throw Error('must not regenerate a completed tree')}}
+ if(fault){
+  await assert.rejects(preparePi(f.store,input,options),fault==='missing'?/层级缺失/:fault==='root'?/摘要仍超出预算/:/总输出预算/)
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM pi_prepared_compactions').get().n,0)
+  assert.equal(f.store.nodeRows('pi-pi-test',0).length,0)
+ }else{
+  assert.ok(total>goal)
+  const prepared=await preparePi(f.store,input,options)
+  assert.deepEqual(prepared.compaction.details.summaryTree.map(n=>n.summary),tree.map(n=>n.summary))
+  assert.equal(prepared.compaction.details.providerUsage.cacheRead,9000)
+  assert.equal(prepared.compaction.details.calls,1)
+  assert.ok(prepared.compaction.summary.includes(tree.at(-1).summary))
+  assert.equal(f.store.nodeRows('pi-pi-test',0).length,2)
+  assert.equal(f.store.nodeRows('pi-pi-test',1).length,1)
+  assert.deepEqual(await preparePi(f.store,input,options),prepared)
+  assert.deepEqual(readPreparedPi(f.store,input,{env:f.env}),prepared)
+ }
 })
 
 test('Pi pressure wait has one deadline even if the backend never resolves', async () => {

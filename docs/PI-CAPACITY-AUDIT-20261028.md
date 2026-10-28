@@ -34,3 +34,18 @@ Pi 原来的比例判断按总窗口计算，但另一路容量保护扣除了�
 本机生成的 `/Users/yu/.pi/agent/extensions/superlcm.ts` 与当前生成器一致，直接导入 `/Users/yu/superlcm/src/pi-runtime.js`。不需要重写设置或接入文件；新开的 Pi 进程加载修复，已经载入旧模块的宿主需要重载。本轮没有中断其他研究会话，也没有发布 npm 包。
 
 本地回执索引：`/tmp/superlcm-pi-installed-suite-20261028.json`；接入核验：`/tmp/superlcm-pi-deployment-20261028.json`。
+
+## 追加核验：摘要树规划目标误当硬上限
+
+上一轮未覆盖“完整树仅略超规划目标”的情况。Pi 确有同类遗漏：`summarizePiFork` 用提示词的树总量目标校验返回结果，又把同一目标交给 `compactPi` 在保存前重新校验。模型正常完成、根摘要有足够空间时，整树估算超过目标 1% 或 7% 仍会被整份拒绝。
+
+修复保持提示词中的规划目标，返回校验改用最终发送请求的实际输出上限，并把该上限一起交给保存接口。原来的根摘要预算、最终请求容量、节点完整性、语言、来源、取消和截断检查继续生效。完整结果保存后可直接复用。Pi 重试状态另外保留最后一次失败的原因、时间和尝试次数，重试开始时仍显示上次原因。
+
+修复前，新增的 1% 和 7% 超目标用例均复现“后台分支摘要超过总输出预算”。修复后：
+
+- `npm run test:pi`：89/89 通过。新增七项覆盖超目标接收、真实输出上限拒绝、完整树保存与复用、根摘要过大和缺失节点；连续重试用例补充核验上次失败原因不被清空。
+- `node --test test/main-fork.test.js test/compression-ratio-models.test.js test/package.test.js`：22/22 通过。
+- `npm run check`：240 个文件通过。
+- 本机 Pi 1.4.0 离线工具循环：500K 场景整树目标 12,000、实际估算 12,840、输出上限 90,000，根摘要 57 token。整树完整保存，原生 80% 边界完成替换，摘要调用一次，替换时新增调用为零，追加原文保留。另验证截断、缺失节点和过大的输出额度三个场景。
+
+集成命令：`node scripts/verify-pi-compaction.mjs --main-fork --full-window --over-planning-target`。回执：`/tmp/superlcm-pi-tree-goal-installed-over-20261028.log`。同样使用本地模拟供应商和受控用量，不消耗收费模型额度。本轮自行复核，没有委派审查。

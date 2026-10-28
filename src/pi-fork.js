@@ -63,8 +63,8 @@ async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = 
   signal?.throwIfAborted()
   const target = Math.min(20000, Math.max(2048, snapshot.tokensBefore * .15))
   const nativeReserve=override?piOutputReserve(null,model):piOutputReserve(capture.payload,model)
-  const treeOptions={fanout:snapshot.summaryTuning?.fanout||4,targetTokens:Math.max(256,Math.min(target,12000,Math.floor(nativeReserve*.65)))}
-  const directive = forkDirective(plan, treeOptions.targetTokens,undefined,treeOptions)
+  const planningOptions={fanout:snapshot.summaryTuning?.fanout||4,targetTokens:Math.max(256,Math.min(target,12000,Math.floor(nativeReserve*.65)))}
+  const directive = forkDirective(plan, planningOptions.targetTokens,undefined,planningOptions)
   let images = 0
   const encoded = JSON.stringify(capture.messages, (_key,value) => { if(value?.type === 'image'){images++;return {type:'image'}};return value })
   const limit = model.contextWindow - 1024 - Math.max(1024,model.contextWindow*.02)
@@ -94,6 +94,11 @@ async function runPiFork(ctx, snapshot, capture, { signal, stage, timeoutMs } = 
   }).result(), signal, timeoutMs)
   signal?.throwIfAborted()
   if (!sent || result.stopReason !== 'stop' || result.content.some(block => block.type === 'toolCall')) throw Error('Pi 后台分支未完整结束，原文保留')
+  // Planning allocates space across levels; it is not an exact tokenizer limit.
+  // Persist the sent output limit so the archive worker revalidates the same
+  // tree without imposing the smaller prompt goal a second time. The installed
+  // root still has its independent compaction and request-capacity checks.
+  const treeOptions={fanout:planningOptions.fanout,targetTokens:piOutputReserve(wireSettings,model)}
   const tree = parseForkTree(result.content.filter(b => b.type === 'text').map(b => b.text).join('\n'), plan,undefined,treeOptions)
   const blocks=tree.filter(n=>n.level===0)
   return { blocks, tree, treeOptions, model: model.id, provider: model.provider, usage: result.usage,

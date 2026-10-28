@@ -59,6 +59,8 @@ With Pi or DSH takeover and main-model branches, each attempt defaults to a ten-
 
 Pi and DSH ratios use the full model context window: a 500K window prepares at 350K and replaces at 400K with the default ratios. Output reservation does not reduce those thresholds. During takeover, effective output limits leave safe space at replacement. Pi changes outgoing payloads while preserving the model configuration; DSH uses the native request waterfall and restores the saved ceiling when takeover ends. If preparation is still retrying at the capacity guard, the current request waits. Oversized new input or tools can still trigger earlier capacity protection.
 
+Pi treats the whole-tree target in the prompt as a planning goal. A complete tree may exceed that goal within the actual request output limit; its root is independently checked against the replacement budget. Retry status retains the last failure reason while a new attempt runs.
+
 ## Optional compaction takeover for Claude Code
 
 Claude Code takeover uses its configured replacement threshold, 300K tokens by default, with preparation scheduled before that threshold. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.

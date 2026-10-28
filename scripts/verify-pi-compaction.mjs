@@ -12,10 +12,12 @@ import { savePiPolicy } from '../src/pi-compaction-policy.js'
 import { readApiKey, saveApiKey } from '../src/api-credentials.js'
 import { findCli } from '../src/runtime.js'
 import { piOutputReserve } from '../src/pi-request.js'
+import { estimateSummaryTokens } from '../src/summary-tokens.js'
 const mainFork = process.argv.includes('--main-fork')
+const overGoal=process.argv.includes('--over-planning-target')
 const fullWindow=process.argv.includes('--full-window'),scale=fullWindow?5:1,window=100000*scale,maxTokens=fullWindow?128000:1024
 const otherModel=process.argv.includes('--other-model'), ratio50=process.argv.includes('--ratio50')
-assert.ok(!(otherModel||ratio50)||mainFork,'native model/ratio fixtures require --main-fork')
+assert.ok(!(otherModel||ratio50||overGoal)||mainFork,'native model/ratio fixtures require --main-fork')
 const passive = process.argv.includes('--passive-only')
 const live = process.argv.includes('--live-luna'), dir = mkdtempSync(join(tmpdir(), 'superlcm-pi-background-'))
 const slow = process.argv.includes('--slow-luna'), fail = process.argv.includes('--fail-luna'), cold = process.argv.includes('--cold-input')
@@ -24,6 +26,7 @@ const nativePayload = process.argv.includes('--oversized-native-payload'), nativ
 const malformed = process.argv.includes('--malformed-summary'), missing = process.argv.includes('--missing-summary-node'), truncated = process.argv.includes('--truncated-summary')
 const badSummary = malformed || missing || truncated, nativeFault = nativePayload
 assert.ok(!live || !(slow || fail || cold || huge || largeInput || nativeFault || badSummary), 'fault injection uses only the local endpoint')
+assert.ok(!overGoal||!live,'over-goal fixture uses only the local endpoint')
 assert.ok(!(nativeFault || nativeOutput || badSummary) || mainFork, 'native fork faults require --main-fork')
 assert.ok(!passive || mainFork && !live && !slow && !fail && !nativeFault && !badSummary, 'passive fixture uses the local native branch')
 const agentDir = join(dir, 'agent'), cwd = join(dir, 'work'), sessions = join(agentDir, 'sessions')
@@ -39,7 +42,7 @@ const aiRoot = join(packageRoot, 'node_modules/@earendil-works/pi-ai/dist')
 const { createAssistantMessageEventStream } = await import(pathToFileURL(join(aiRoot, 'utils/event-stream.js')).href)
 const { fauxAssistantMessage, fauxToolCall } = await import(pathToFileURL(join(aiRoot, 'providers/faux.js')).href)
 const archive = new ClaudeStore(join(dir, 'archive'))
-let server, mainServer, faultTimer, apiCalls = 0, session, mainCalls = 0, readyApiCalls, swapApiCalls, swapEntry, abortedNativeCalls = 0, transportCalls = 0
+let server, mainServer, faultTimer, branchSummaryBudget, apiCalls = 0, session, mainCalls = 0, readyApiCalls, swapApiCalls, swapEntry, abortedNativeCalls = 0, transportCalls = 0
 const mainPayloads = [], branchPayloads = []
 let mainStartedResolve
 const mainStarted = new Promise(resolve => { mainStartedResolve = resolve })
@@ -63,7 +66,16 @@ try {
       if(slow)await new Promise(resolve=>setTimeout(resolve,400))
       const plan=JSON.parse(directive.split('\n').find(line=>line.startsWith('[{"index":')))
       if(missing)plan.pop()
-      content=JSON.stringify({blocks:plan.map(part=>({index:part.index,summary:'# 当前状态\n检查尚未结束。部署必须另行获得用户明确授权。原始路径和证据请回查。'}))});tokens=500
+      const blocks=plan.map(part=>({index:part.index,summary:'# 当前状态\n检查尚未结束。部署必须另行获得用户明确授权。原始路径和证据请回查。'}))
+      if(overGoal){
+        const goal=Number(directive.match(/together must fit (\d+) tokens/)[1])
+        const total=()=>estimateSummaryTokens(blocks.map(b=>b.summary).join('\n'))
+        const wanted=Math.ceil(goal*1.07)
+        blocks[0].summary+='证'.repeat(Math.ceil(Math.max(0,wanted-total())/1.5))
+        branchSummaryBudget={goal,total:total(),output:piOutputReserve(body),root:estimateSummaryTokens(blocks.at(-1).summary)}
+        assert.ok(branchSummaryBudget.total>goal&&branchSummaryBudget.total<branchSummaryBudget.output)
+      }
+      content=JSON.stringify({blocks});tokens=500
       if(malformed)content='invalid JSON from synthetic summary provider'
     }else{
       mainPayloads.push(body);mainCalls++;mainStartedResolve();tool=mainCalls< (slow?2:3)
@@ -194,6 +206,10 @@ try {
     assert.deepEqual({...branch,messages:[],model:undefined},{...main,messages:[],model:undefined})
     assert.equal(branch.model,otherModel?'scripted-summary':'scripted-main');assert.equal(main.model,'scripted-main')
     assert.equal(swapEntry.details.providerUsage.cacheRead,256)
+    if(overGoal){
+      assert.ok(branchSummaryBudget.total>branchSummaryBudget.goal)
+      assert.equal(estimateSummaryTokens(swapEntry.details.summaryTree.map(n=>n.summary).join('\n')),branchSummaryBudget.total,'save the full tree without trimming')
+    }
     if(fullWindow){assert.equal(piOutputReserve(main),90000);assert.equal(session.model.maxTokens,128000)}
     if(nativeOutput&&!fullWindow)assert.equal(piOutputReserve(main),18000)
   }
@@ -204,7 +220,7 @@ try {
   assert.ok(archive.eventRows(key).map(row => archive.exact(key, row.ordinal)).join('').startsWith(original))
   const receipt = { ok: true, directory: dir, installedPi: JSON.parse(readFileSync(join(packageRoot, 'package.json'))).version, backgroundAt: ratio50?'40%':'70%', replacedAt: ratio50?'50%':'80%', mainContinuedDuringPreparation: true,
     mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal',contextWindow:window,configuredMaxTokens:maxTokens,effectiveMaxTokens:mainFork?piOutputReserve(mainPayloads[0]):undefined, uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
-    nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true }
+    nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true,...(overGoal?{branchSummaryBudget}:{}) }
   writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
   }
 } finally {

@@ -118,6 +118,7 @@ export function registerPiCompaction(pi, options, {
           current.controller.signal.throwIfAborted()
           if(state!==current||!valid(ctx))throw Error('Pi 后台分支已过期')
           current.attempt++;current.retryAt=null
+          if(current.lastFailure)status(ctx,`SuperLCM：第 ${current.attempt} 次后台摘要，上次失败：${current.lastFailure.message.slice(0,160)}`)
           try{
             const result=await summaryAttempt(work,current.controller.signal,attemptTimeoutMs)
             if(!result?.compaction)throw Error('Pi 后台摘要未返回完整结果，原文保留')
@@ -132,10 +133,11 @@ export function registerPiCompaction(pi, options, {
               throw error
             }
             if(p.summaryMode!=='main-fork'||current.controller.signal.aborted||state!==current||!valid(ctx))throw error
+            current.lastFailure={attempt:current.attempt,message:String(error.message||error),at:Date.now()}
             failed(ctx)
             const delay=Math.min(300000,Math.max(0,retryAfter-Date.now()))
             current.retryAt=Date.now()+delay
-            status(ctx,`SuperLCM：第 ${current.attempt} 次摘要未完成，${Math.ceil(delay/1000)} 秒后自动重试`)
+            status(ctx,`SuperLCM：第 ${current.attempt} 次摘要未完成，${Math.ceil(delay/1000)} 秒后自动重试：${current.lastFailure.message.slice(0,160)}`)
             await retryDelay(delay,current.controller.signal)
           }
         }
