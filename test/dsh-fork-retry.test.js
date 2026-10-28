@@ -11,6 +11,41 @@ function tree(options) {
  return JSON.stringify({blocks:plan.map(p=>({index:p.index,summary:'# Historical state\nPreserve original constraints, source references and pending work.'}))})
 }
 
+test('Persian DSH fork retries Arabic output before replacing the active context',async t=>{
+ const fa='لطفا این فایل را بخوان و بگو چرا خطا می‌دهد. می‌خواهم که پلاگین را نصب کنی و گزارش بدهی'
+ const ar='من فضلك اقرأ هذا الملف وأخبرني لماذا يظهر الخطأ. أريد أن تثبت الإضافة وتكتب لي تقريرا'
+ const h=await lab({capacity:64000,config:{summaryMode:'main-fork',summaryTimeoutMs:600000,summaryRetryCooldownMs:1000}})
+ const original=h.ctx.llm.stream.bind(h.ctx.llm),prompts=[];let pending
+ try{
+  while(h.ctx.tokenMeter.measure(h.agent.session).totalTokens<64000*.9){
+   if(h.agent.session.snapshotEvents().length>200)throw Error('Persian fixture did not reach the intended pressure')
+   h.agent.session.append('user/message',message(fa.repeat(60)),{surfaceOp:'append'})
+  }
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   const prompt=options.messages.at(-1).content.map(b=>b.text||'').join('');prompts.push(prompt)
+   const plan=JSON.parse(prompt.split('\n').find(line=>line.startsWith('[{"index":')))
+   const text=prompts.length===1?'# ملخص\n'+ar:'# وضعیت\n'+fa
+   yield {type:'text-delta',index:0,text:JSON.stringify({blocks:plan.map(p=>({index:p.index,summary:text}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  t.mock.timers.enable({apis:['setTimeout','Date']})
+  pending=send(h,'KEEP THE NEW REQUEST EXACTLY',{timeout:10000000})
+  await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
+  const state=h.engine.backgroundFolds.get(h.agent)
+  assert.match(prompts[0],/Use Persian/)
+  assert.equal(count(h,'compaction/summary'),0);assert.equal(h.main.length,0)
+  t.mock.timers.tick(state.retryAt-Date.now())
+  await pending
+  assert.equal(prompts.length,2);assert.match(prompts[1],/previous attempt failed output validation/)
+  assert.equal(count(h,'compaction/summary'),1)
+  assert.ok(h.main[0].content.includes('KEEP THE NEW REQUEST EXACTLY'))
+  assert.ok(h.agent.session.snapshotEvents().some(event=>JSON.stringify(event).includes(fa)))
+ }finally{
+  h.agent.cancel({kind:'user'},{keepInbox:true});t.mock.timers.reset()
+  await pending;await close(h)
+ }
+})
+
 test('a native fork can run past ten minutes while real output continues',async t=>{
  const h=await lab({capacity:500000,config:{summaryMode:'main-fork',summaryTimeoutMs:600000,summaryRetryCooldownMs:1000}})
  const original=h.ctx.llm.stream.bind(h.ctx.llm),gates=[];let branches=0,pending

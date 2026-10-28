@@ -487,6 +487,12 @@ test('durable prepared lookup is read-only, works after appended raw records and
   assert.equal(ready.compaction.firstKeptEntryId, 'c'); assert.equal(generated, 1)
   assert.match(f.store.exact('pi-pi-test', 4), /later append/)
   assert.equal(readPreparedPi(f.store, { ...f.input, draftKey: 'b'.repeat(64) }, { env: f.env }), null)
+  const {forkHash}=await import('../src/fork-summary.js'),{summarySettingsRevision}=await import('../src/summarize.js')
+  const oldRevision=forkHash(['pi-api-preparation-v2',readPiPolicy(f.store.dir),summarySettingsRevision(f.store,'pi-pi-test',f.env)])
+  f.store.db.prepare('UPDATE pi_prepared_compactions SET revision=? WHERE session=? AND draft_key=?').run(oldRevision,'pi-pi-test',f.input.draftKey)
+  assert.equal(readPreparedPi(f.store,f.input,{env:f.env}),null,'a draft checked under the old language policy cannot be installed')
+  f.store.db.prepare('UPDATE pi_prepared_compactions SET revision=? WHERE session=? AND draft_key=?').run(ready.compaction.details.summaryRevision,'pi-pi-test',f.input.draftKey)
+  assert.deepEqual(readPreparedPi(f.store,f.input,{env:f.env}),ready)
   savePiPolicy(f.store, { enabled: true, ratio: .9 })
   assert.equal(readPreparedPi(f.store, f.input, { env: f.env }), null)
   savePiPolicy(f.store, { enabled: true, ratio: .8 })
@@ -595,6 +601,26 @@ test('Pi main-fork stores provider usage and blocks without touching the indepen
   await assert.rejects(preparePi(f.store,input,options),/设置已变化/)
 })
 
+test('Pi rejects an Arabic branch for Persian history and installs a corrected draft',async t=>{
+  const {forkHash}=await import('../src/fork-summary.js')
+  const fa='لطفا این فایل را بخوان و بگو چرا خطا می‌دهد. می‌خواهم که پلاگین را نصب کنی و گزارش بدهی'
+  const ar='من فضلك اقرأ هذا الملف وأخبرني لماذا يظهر الخطأ. أريد أن تثبت الإضافة وتكتب لي تقريرا'
+  const f=fixture(t);f.entries[1].message.content=fa.repeat(200)
+  const original=f.entries.map(JSON.stringify).join('\n')+'\n';writeFileSync(f.input.session_file,original)
+  f.input.source=serializePiMessages(f.entries.slice(1,3).map(e=>e.message))
+  savePiPolicy(f.store,{enabled:true,ratio:.8,summaryMode:'main-fork'});f.store.clearHarnessSetting('pi')
+  const staged=stagePi(f.store,f.input,{env:f.env})
+  const input={...f.input,draftKey:'9'.repeat(64),forkRevision:staged.revision,forkSummary:{model:'fixture-main',provider:'fixture',sourceDigest:forkHash(f.input.source),prefixHash:'fixture',requestSettingsHash:'fixture',usage:{},blocks:[{index:0,firstMessage:1,lastMessage:2,summary:'# ملخص\n'+ar}]}}
+  await assert.rejects(preparePi(f.store,input,{env:f.env}),/language mismatch/)
+  assert.equal(readPreparedPi(f.store,input,{env:f.env}),null)
+  assert.equal(readFileSync(f.input.session_file,'utf8'),original)
+  input.forkSummary.blocks[0].summary='# وضعیت\n'+fa
+  const prepared=await preparePi(f.store,input,{env:f.env})
+  assert.ok(prepared.compaction.summary.includes(fa))
+  assert.deepEqual(readPreparedPi(f.store,input,{env:f.env}),prepared)
+  assert.equal(readFileSync(f.input.session_file,'utf8'),original)
+})
+
 for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'rejects '+fault:'retains an over-goal tree and reuses it without regeneration'),async t=>{
  const {forkHash,forkTreePlan}=await import('../src/fork-summary.js')
  const f=fixture(t)
@@ -631,9 +657,10 @@ for(const fault of [null,'root','tree','missing'])test('Pi saved tree '+(fault?'
   assert.deepEqual(await preparePi(f.store,input,options),prepared)
   assert.deepEqual(readPreparedPi(f.store,input,{env:f.env}),prepared)
   const currentRevision=prepared.compaction.details.summaryRevision
-  const oldRevision=forkHash(['pi-main-fork-tree-v2',readPiPolicy(f.store.dir)])
-  f.store.db.prepare('UPDATE pi_prepared_compactions SET revision=? WHERE session=? AND draft_key=?').run(oldRevision,'pi-pi-test',input.draftKey)
-  assert.equal(readPreparedPi(f.store,input,{env:f.env}),null,'a fork prepared under the old tree semantics cannot be installed')
+  for(const oldRevision of [forkHash(['pi-main-fork-tree-v2',readPiPolicy(f.store.dir)]),forkHash(['pi-main-fork-tree-v3',readPiPolicy(f.store.dir)])]){
+   f.store.db.prepare('UPDATE pi_prepared_compactions SET revision=? WHERE session=? AND draft_key=?').run(oldRevision,'pi-pi-test',input.draftKey)
+   assert.equal(readPreparedPi(f.store,input,{env:f.env}),null,'a fork prepared under the old tree or language policy cannot be installed')
+  }
   f.store.db.prepare('UPDATE pi_prepared_compactions SET revision=? WHERE session=? AND draft_key=?').run(currentRevision,'pi-pi-test',input.draftKey)
   const obsolete={...prepared.compaction,summary:'# Obsolete prepared result\n'+'pending '.repeat(20000)}
   f.store.db.prepare('UPDATE pi_prepared_compactions SET compaction=? WHERE session=? AND draft_key=?').run(JSON.stringify(obsolete),'pi-pi-test',input.draftKey)

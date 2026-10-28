@@ -44,9 +44,9 @@ function activeBranch(store, session, leafId, keptId) {
 
 export function piPreparationRevision(store, session, env = process.env) {
   const policy = readPiPolicy(store.dir)
-  // Fork drafts produced before parent summaries were preserved may have
-  // dropped parent-only facts. Regenerate them instead of installing them.
-  return policy.summaryMode === 'main-fork' ? forkHash(['pi-main-fork-tree-v3', policy]) : forkHash(['pi-api-preparation-v2',policy,summarySettingsRevision(store, session, env)])
+  // A ready draft must have been checked under the current summary policy.
+  // Earlier fork trees may also lack model-written parent facts.
+  return policy.summaryMode === 'main-fork' ? forkHash(['pi-main-fork-tree-v3',SUMMARY_POLICY_VERSION,policy]) : forkHash(['pi-api-preparation-v2',SUMMARY_POLICY_VERSION,policy,summarySettingsRevision(store, session, env)])
 }
 export function stagePi(store, input, { env = process.env } = {}) {
   const policy = readPiPolicy(store.dir)
