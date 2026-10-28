@@ -53,7 +53,7 @@ flowchart LR
 
 Before the normal preparation point, SuperLcm archives originals. At preparation, it fixes a safe older range and plans the whole tree. One model request returns all source summaries and their parent summaries together. **A 20K-token block describes source granularity; it is not a separate model call.** The main conversation continues during preparation, and replacement reads the saved result.
 
-“One response” means one successful preparation task. A later task can prepare a newly eligible range; failed or invalidated work can be retried. Capacity protection can start preparation earlier. With takeover off, summaries stay available for archive lookup and the host manages its own context. Explicit independent API mode keeps its separate background batch writer. Cache usage follows provider receipts.
+“One response” means one successful preparation task. A later task can prepare a newly eligible range; failed or invalidated work can be retried. If a sudden increase leaves an already prepared summary unable to make enough space, capacity protection pauses the request and can prepare a wider range. With takeover off, summaries stay available for archive lookup and the host manages its own context. Explicit independent API mode keeps its separate background batch writer. Cache usage follows provider receipts.
 
 With Pi or DSH takeover and main-model branches, an attempt times out after ten minutes without meaningful output; it may continue longer while the model streams text or reasoning. Failures retry automatically in the background with increasing waits, capped at five minutes between attempts; there is no overall retry time or attempt limit. At the capacity guard, the current request stays saved and paused until a validated summary can replace the selected source. User cancellation, settings or model changes, source invalidation, and engine shutdown cancel the old job. Invalid or late results never replace originals. Pi waits for a fresh provider request when the captured prefix or model no longer matches.
 
@@ -65,9 +65,9 @@ On a near-full Pi resume, SuperLcm first looks for a prepared result. If a new c
 
 ## Optional compaction takeover for Claude Code
 
-Claude Code takeover uses its configured replacement threshold, 300K tokens by default, with preparation scheduled before that threshold. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.
+When enabled from the Compression page, Claude Code takeover defaults to replacement at 80% of the model window, with preparation ten percentage points earlier. Older absolute-token settings, including the CLI default of 300K, remain in effect until a ratio is saved. The latest 40K tokens stay verbatim by default, and complete originals remain available. Branch mode only reads prepared summaries at replacement; missing safe coverage or boundaries return control to native Claude compaction.
 
-Takeover is off by default. Enable it under **Tools → Optional context compaction → Claude Code**. The Claude plugin provides capture hooks, four recall tools, the compaction module and `/superlcm:console`. The module requires Claude Code 2.1.286+; the console reports local capabilities.
+Takeover is off by default. Enable it under **Compression → Claude Code**. The Claude plugin provides capture hooks, four recall tools, the compaction module and `/superlcm:console`. The module requires Claude Code 2.1.286+; the console reports local capabilities.
 
 ## Shorter context, preserved originals
 

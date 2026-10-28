@@ -44,6 +44,7 @@ test('Claude resumes a native fork, inherits settings and records real usage',as
  })})
  assert.equal(result.branchId,'fork-session');assert.equal(result.usage.cache_read_input_tokens,300000)
  assert.ok(seen.args.includes('--fork-session'));assert.ok(seen.args.includes('original-session'))
+ assert.ok(seen.args.includes('--include-partial-messages'))
  assert.ok(!seen.args.some(a=>['--system-prompt','--model','--tools'].includes(a)))
  assert.equal(seen.options.env.SUPERLCM_CLI_WORKER,'1');assert.match(seen.args.at(-1),/PreToolUse/)
 })
@@ -153,6 +154,64 @@ test('native branch default allows ten minutes per attempt',async t=>{
   t.mock.timers.tick(600000)
   await assert.rejects(job,error=>error.summaryKind==='timeout')
  }finally{t.mock.timers.reset()}
+})
+
+test('Claude native fork renews its ten-minute idle timer only for meaningful stream output',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let child,progress=0
+ const job=summarizeClaudeFork('source','summary',{env,progress:()=>progress++,spawnProcess:fake(c=>{child=c})})
+ try{
+  for(let i=0;i<3;i++){
+   t.mock.timers.tick(540000)
+   emit(child,{type:'stream_event',event:{type:'content_block_delta',delta:{type:i%2?'thinking_delta':'text_delta',...(i%2?{thinking:'thinking'}:{text:'evidence'})}}})
+   await new Promise(setImmediate)
+  }
+  emit(child,{type:'result',subtype:'success',result:'# History\nSynthetic evidence.',stop_reason:'end_turn'})
+  assert.match((await job).text,/Synthetic evidence/);assert.equal(progress,3)
+ }finally{t.mock.timers.reset()}
+})
+
+test('Claude native fork does not renew its idle timer for whitespace or lifecycle events',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let child,progress=0
+ const job=summarizeClaudeFork('source','summary',{env,progress:()=>progress++,spawnProcess:fake(c=>{child=c})})
+ const rejected=assert.rejects(job,error=>error.summaryKind==='timeout')
+ try{
+  t.mock.timers.tick(540000)
+  emit(child,{type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'  '}}})
+  emit(child,{type:'stream_event',event:{type:'message_start'}});await new Promise(setImmediate)
+  t.mock.timers.tick(60001);await rejected;assert.equal(progress,0)
+ }finally{t.mock.timers.reset()}
+})
+
+test('Codex native fork renews its idle timer on active branch text and reasoning',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let child,started=false,progress=0
+ const job=summarizeCodexFork('source','summary',{env,progress:()=>progress++,spawnProcess:fake(c=>{
+  child=c;let input='';c.stdin.on('data',data=>{input+=data.toString();for(let i;(i=input.indexOf('\n'))>=0;){
+   const item=JSON.parse(input.slice(0,i));input=input.slice(i+1);if(!item.id)continue
+   if(item.method==='initialize')emit(c,{id:item.id,result:{}})
+   if(item.method==='thread/fork')emit(c,{id:item.id,result:{thread:{id:'branch'}}})
+   if(item.method==='turn/start'){emit(c,{id:item.id,result:{}});started=true}
+  }})
+ })})
+ try{
+  await until(()=>started)
+  for(const method of ['item/agentMessage/delta','item/reasoning/textDelta','item/reasoning/summaryTextDelta']){
+   t.mock.timers.tick(540000);emit(child,{method,params:{threadId:'branch',delta:'progress'}});await new Promise(setImmediate)
+  }
+  emit(child,{method:'item/completed',params:{threadId:'branch',item:{type:'agentMessage',text:'# History\nSynthetic evidence.'}}})
+  emit(child,{method:'turn/completed',params:{threadId:'branch',turn:{status:'completed'}}})
+  assert.match((await job).text,/Synthetic evidence/);assert.equal(progress,3)
+ }finally{t.mock.timers.reset()}
+})
+
+test('native background worker forwards progress to its outer idle timer',async t=>{
+ const {store}=archive(t),plan=planMainFork(store,'session',{force:true,env:{}})
+ t.mock.timers.enable({apis:['setTimeout','setInterval']});let touch,release
+ const gate=new Promise(resolve=>release=resolve),job=generateMainFork(store,'session',{env:{},queuedPlan:plan,summarize:async(_h,_s,_p,options)=>{touch=options.progress;await gate;return {text:treeAnswer(plan),model:'synthetic'}}})
+ try{
+  await until(()=>!!touch)
+  for(let i=0;i<3;i++){t.mock.timers.tick(540000);touch();await new Promise(setImmediate)}
+  release();assert.equal((await job).calls,1)
+ }finally{release();await job.catch(()=>{});t.mock.timers.reset()}
 })
 
 test('native background worker retries beyond three failures without another foreground turn',async t=>{

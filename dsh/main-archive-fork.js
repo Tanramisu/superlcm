@@ -49,7 +49,14 @@ export class MainArchiveFork {
   }
   capture(id){const session=this.ctx.sessions.get(id);if(session){const cursor=this.db.cursor(id);this.db.capture(session.header,Array.from({length:Math.max(0,session.seq-cursor)},(_,i)=>session.eventAt(cursor+i)))}}
   mirror(id){
-    const session=dshSessionKey(id),nodes=this.db.nodes(id),stamp=forkHash(nodes.map(n=>n.id));if(!nodes.length||!this.store.source(session)||this.store.isDeleted(session)||this.mirrored.get(id)===stamp)return
+    const session=dshSessionKey(id),nodes=this.db.nodes(id),stamp=forkHash(nodes.map(n=>n.id));if(!nodes.length||!this.store.source(session)||this.store.isDeleted(session))return
+    const archiveId=node=>node.nativeId?'dsh-native-'+node.nativeId:'dsh-fork-'+forkHash([id,node.id]).slice(0,24)
+    if(this.mirrored.get(id)===stamp){
+      // An explicit re-import can recreate the same native tree after deleting
+      // its shared copy. The in-memory stamp alone cannot prove it is present.
+      const known=new Set(this.store.db.prepare('SELECT id FROM nodes WHERE session=?').all(session).map(row=>row.id))
+      if(nodes.every(node=>known.has(archiveId(node))))return
+    }
     const rows=this.db.sourceRows(id),originals=[],positions=new Map()
     for(const row of this.store.db.prepare('SELECT ordinal,digest FROM events WHERE session=? ORDER BY ordinal').all(session)){
       const record=JSON.parse(this.store.exact(session,row.ordinal));if(record.event?.seq!==undefined)positions.set(record.event.seq,{...row,event:record.event})
@@ -65,7 +72,7 @@ export class MainArchiveFork {
     const tree=nodes.map((node,index)=>{
       const sourceRecords=node.sources.map(seq=>positions.get(seq).ordinal)
       const variant=this.db.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sl_summary_variants'").get()?this.db.db.prepare('SELECT summary FROM sl_summary_variants WHERE session=? AND id=?').get(id,node.id)?.summary:undefined
-      return {index,archiveId:node.nativeId?'dsh-native-'+node.nativeId:'dsh-fork-'+forkHash([id,node.id]).slice(0,24),level:node.level,kind:node.kind,modelSummary:variant,firstMessage:Math.min(...sourceRecords),lastMessage:Math.max(...sourceRecords),sourceRecords,children:node.children.map(child=>{if(!ids.has(child))throw Error('DSH 分支摘要树不完整');return ids.get(child)}),summary:node.summary}
+      return {index,archiveId:archiveId(node),level:node.level,kind:node.kind,modelSummary:variant,firstMessage:Math.min(...sourceRecords),lastMessage:Math.max(...sourceRecords),sourceRecords,children:node.children.map(child=>{if(!ids.has(child))throw Error('DSH 分支摘要树不完整');return ids.get(child)}),summary:node.summary}
     })
     const doc=readSettings(this.file)
     if(!doc.settings.summaryEnabled)return

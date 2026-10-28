@@ -42,12 +42,15 @@ export function captureDshPacket(store, packet, {clientKind='hook',legacyCapture
   const file = join(folder, sha(id).slice(0, 40) + '.jsonl')
   let header = JSON.stringify(mergeDshHeader(null,packet.header))
   const records = packet.records.map(record => ({ record, digest: checkRecord(record, id) }))
-  let added = 0
+  let added = 0,importingDeleted=false,indexed=null
   store.db.exec('BEGIN IMMEDIATE')
   try {
     if(store.isDeleted(session)) {
       if(clientKind!=='import'){store.db.exec('COMMIT');return {session,skipped:'deleted'}}
-      for(const table of ['deleted_sessions','dsh_mirrors','dsh_event_digests'])store.db.prepare('DELETE FROM '+table+' WHERE session=?').run(session)
+      importingDeleted=true
+      // Keep the deletion fence until the source and its DSH identity have
+      // both been indexed successfully in this transaction.
+      for(const table of ['dsh_mirrors','dsh_event_digests'])store.db.prepare('DELETE FROM '+table+' WHERE session=?').run(session)
     }
     const saved = store.db.prepare('SELECT * FROM dsh_mirrors WHERE session=?').get(session)
     header=JSON.stringify(mergeDshHeader(saved?JSON.parse(saved.header):null,packet.header))
@@ -89,15 +92,34 @@ export function captureDshPacket(store, packet, {clientKind='hook',legacyCapture
     if (Buffer.byteLength(text) > 34e6) throw Error('DSH capture batch exceeds 34 MB; split the batch')
     if (text) { appendFileSync(file, text, { mode: 0o600 }); bytes += Buffer.byteLength(text) }
     store.db.prepare('INSERT INTO dsh_mirrors VALUES(?,?,?,?) ON CONFLICT(session) DO UPDATE SET next_seq=excluded.next_seq,bytes=excluded.bytes').run(session, header, next, bytes)
+    // Commit the mirror, indexed source and host identity together. Deletion
+    // cannot observe a first capture with only half of its ownership recorded.
+    if(existsSync(file))indexed=store.ingest(session,file,'jsonl',{inTransaction:true,automatic:clientKind!=='import'||!importingDeleted,origin:{harness:'dsh',externalId:id}})
     store.db.exec('COMMIT')
-  } catch (error) { store.db.exec('ROLLBACK'); throw error }
-  if (existsSync(file)) {
-    const indexed=store.ingest(session,file,'jsonl',{automatic:clientKind!=='import'})
+  } catch (error) {
+    if(store.db.isTransaction)store.db.exec('ROLLBACK')
+    // An append can reach disk before an indexing failure. If this was an
+    // attempt to revive a deleted conversation, keep its privacy fence and
+    // enqueue the staged copy; a newer successful import is protected.
+    if(importingDeleted)try{
+      store.db.exec('BEGIN IMMEDIATE')
+      if(store.isDeleted(session)&&!store.source(session)){
+        const queue=store.db.prepare('INSERT OR IGNORE INTO deleted_session_files(session,path) VALUES(?,?)')
+        queue.run(session,file);queue.run(session,store.archivePath(session))
+        for(const table of ['dsh_mirrors','dsh_event_digests','dsh_activity','dsh_legacy_sources'])
+          if(store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))store.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+      }
+      store.db.exec('COMMIT');store.cleanupDeletedFiles(session)
+    }catch{if(store.db.isTransaction)try{store.db.exec('ROLLBACK')}catch{}}
+    throw error
+  }
+  if (indexed) {
     if(indexed.skipped)return indexed
     // Importing or replaying history is not new conversation activity. Keep
     // the list ordered by the native last event, rather than archive time.
     store.db.exec('BEGIN IMMEDIATE')
     try {
+      if(store.isDeleted(session)||!store.source(session)){store.db.exec('COMMIT');return {session,skipped:'deleted'}}
       const count = store.db.prepare('SELECT records FROM session_event_counts WHERE session=?').get(session)?.records ?? 0
       if (count) {
         const last = records.find(item => archivePosition(item.record) === count - 1)?.record.event
@@ -108,10 +130,10 @@ export function captureDshPacket(store, packet, {clientKind='hook',legacyCapture
           store.db.prepare('UPDATE sources SET updated_ms=? WHERE session=?').run(Math.round(time), session)
         }
       }
+      const first = store.db.prepare("SELECT preview FROM events WHERE session=? AND preview LIKE 'user:%' ORDER BY ordinal LIMIT 1").get(session)
+      store.setMetadata(session, { harness: 'dsh', externalId: id, name: packet.title || first?.preview.replace(/^user:\s*/, '').slice(0, 100) || id, nameSource: packet.title ? 'native' : 'derived' })
       store.db.exec('COMMIT')
     } catch (error) { store.db.exec('ROLLBACK'); throw error }
-    const first = store.db.prepare("SELECT preview FROM events WHERE session=? AND preview LIKE 'user:%' ORDER BY ordinal LIMIT 1").get(session)
-    store.setMetadata(session, { harness: 'dsh', externalId: id, name: packet.title || first?.preview.replace(/^user:\s*/, '').slice(0, 100) || id, nameSource: packet.title ? 'native' : 'derived' })
     // Capture preserves the user's independent archive-summary preference.
     if(!legacyDshSource(store.db,session))syncDshSummaries(store, session, id)
   }

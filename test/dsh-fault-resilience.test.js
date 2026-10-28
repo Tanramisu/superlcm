@@ -2,7 +2,7 @@
 // All originals, sessions and providers in this suite are synthetic and local.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtempSync} from 'node:fs'
+import {existsSync,mkdtempSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {createHash} from 'node:crypto'
@@ -250,4 +250,60 @@ test('deleting a DSH archive clears native and shared copies and fences later au
    captureDshPacket(shared,{header,records:[record]},{clientKind:'import'})
    db.capture(header,[event]);assert.equal(db.find({session:header.id,query:'PRIVATE RECORD'}).items.length,1)
   }finally{native.close();db.close();shared.close()}
+})
+
+test('deletion between first DSH indexing and post-capture bookkeeping clears both archives',async()=>{
+ const {ClaudeStore}=await import('../src/store.js'),{ArchiveDatabase}=await import('../dsh/archive-db.js')
+ const {captureDshPacket,projectDshEvent}=await import('../src/dsh.js')
+ const dir=mkdtempSync(join(tmpdir(),'slcm-dsh-first-delete-')),writer=new ClaudeStore(dir),deleter=new ClaudeStore(dir)
+ const archive=new ArchiveDatabase(join(dir,'lcm.sqlite')),native=new SuperLcmStore(join(dir,'lcm.sqlite'))
+ const header={id:'synthetic-first-capture',createdAt:1,cwd:'/fixture'}
+ const event={seq:0,time:1,type:'user/message',surfaceOp:'append',data:{role:'user',content:[{type:'text',text:'SYNTHETIC FIRST RECORD'}]}}
+ try{
+  archive.capture(header,[event]);native.upsertNode({sessionId:header.id,nodeId:'n',summaryText:'SYNTHETIC FIRST SUMMARY',sourceSeqs:[0]})
+  const exec=writer.db.exec.bind(writer.db);let deleted=false
+  writer.db.exec=sql=>{
+   const result=exec(sql)
+   if(sql==='COMMIT'&&!deleted&&writer.source('dsh-'+header.id)){
+    deleted=true;const identity=deleter.metadata('dsh-'+header.id)
+    assert.equal(identity.harness,'dsh');assert.equal(identity.conversation_id,header.id)
+    deleter.deleteSession('dsh-'+header.id)
+   }
+   return result
+  }
+  const result=captureDshPacket(writer,{header,records:[projectDshEvent(header.id,event,'SYNTHETIC FIRST RECORD')]})
+  assert.equal(result.skipped,'deleted');assert.equal(writer.isDeleted('dsh-'+header.id),true)
+  assert.equal(archive.find({session:header.id,query:'FIRST RECORD'}).items.length,0)
+  assert.equal(native.getNode(header.id,'n'),null)
+ }finally{native.close();archive.close();deleter.close();writer.close()}
+})
+
+test('failed DSH reimport after appending keeps the deletion fence and removes its staged file',async()=>{
+ const {ClaudeStore}=await import('../src/store.js'),{captureDshPacket,projectDshEvent}=await import('../src/dsh.js')
+ const dir=mkdtempSync(join(tmpdir(),'slcm-dsh-failed-reimport-')),s=new ClaudeStore(dir)
+ const header={id:'synthetic-reimport',createdAt:1,cwd:'/fixture'}
+ const event={seq:0,time:1,type:'user/message',surfaceOp:'append',data:{role:'user',content:[{type:'text',text:'SYNTHETIC PRIVATE REIMPORT'}]}}
+ const packet={header,records:[projectDshEvent(header.id,event,'SYNTHETIC PRIVATE REIMPORT')]}
+ try{
+  captureDshPacket(s,packet);const id='dsh-'+header.id,file=s.source(id).path;s.deleteSession(id)
+  const ingest=s.ingest.bind(s);s.ingest=(...args)=>{ingest(...args);throw Error('injected index failure')}
+  assert.throws(()=>captureDshPacket(s,packet,{clientKind:'import'}),/injected index failure/)
+  assert.equal(s.isDeleted(id),true);assert.equal(s.source(id),undefined)
+  assert.equal(existsSync(file),false);assert.equal(existsSync(s.archivePath(id)),false);assert.equal(s.db.prepare('SELECT 1 FROM dsh_mirrors WHERE session=?').get(id),undefined)
+  s.ingest=ingest;captureDshPacket(s,packet,{clientKind:'import'});assert.equal(s.isDeleted(id),false)
+ }finally{s.close()}
+})
+
+test('deleting an old DSH capture without origin metadata uses its verified mirror identity',async()=>{
+ const {ClaudeStore}=await import('../src/store.js'),{ArchiveDatabase}=await import('../dsh/archive-db.js')
+ const {captureDshPacket,projectDshEvent}=await import('../src/dsh.js')
+ const dir=mkdtempSync(join(tmpdir(),'slcm-old-dsh-delete-')),s=new ClaudeStore(dir),archive=new ArchiveDatabase(join(dir,'lcm.sqlite')),native=new SuperLcmStore(join(dir,'lcm.sqlite'))
+ const header={id:'synthetic-old',createdAt:1,cwd:'/fixture'}
+ const event={seq:0,time:1,type:'user/message',surfaceOp:'append',data:{role:'user',content:[{type:'text',text:'SYNTHETIC OLD RECORD'}]}}
+ try{
+  archive.capture(header,[event]);native.upsertNode({sessionId:header.id,nodeId:'n',summaryText:'SYNTHETIC OLD SUMMARY',sourceSeqs:[0]})
+  captureDshPacket(s,{header,records:[projectDshEvent(header.id,event,'SYNTHETIC OLD RECORD')]})
+  s.db.prepare('DELETE FROM session_origins WHERE session=?').run('dsh-'+header.id);s.deleteSession('dsh-'+header.id)
+  assert.equal(archive.find({session:header.id,query:'OLD RECORD'}).items.length,0);assert.equal(native.getNode(header.id,'n'),null)
+ }finally{native.close();archive.close();s.close()}
 })

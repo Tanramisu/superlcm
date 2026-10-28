@@ -220,7 +220,13 @@ try {
     writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
   } else {
   if(mainFork){
-    assert.equal(branchPayloads.length,1);assert.equal(apiCalls,1)
+    const branchPlans=branchPayloads.map(p=>JSON.parse(p.messages.at(-1).content.split('\n').find(line=>line.startsWith('[{"index":'))))
+    if(branchPlans.length>1){
+      assert.ok(slow&&fullWindow,'only a verified insufficient draft may require expanded recovery')
+      assert.equal(branchPlans.length,2);assert.ok(statuses.some(text=>text.includes('旧摘要覆盖不足')))
+      assert.ok(branchPlans[1].at(-1).lastMessage>branchPlans[0].at(-1).lastMessage,'recovery must cover additional source, not regenerate the same range')
+    }else assert.equal(branchPlans.length,1)
+    assert.equal(apiCalls,branchPlans.length)
     const branch=branchPayloads[0], main=mainPayloads[0]
     writeFileSync(join(dir,'wire-fixtures.json'),JSON.stringify({branch,main}))
     assert.deepEqual(branch.messages.slice(0,-1),main.messages)
@@ -231,7 +237,7 @@ try {
       assert.ok(branchSummaryBudget.total>branchSummaryBudget.goal)
       assert.equal(estimateSummaryTokens(swapEntry.details.summaryTree.map(n=>n.summary).join('\n')),branchSummaryBudget.total,'save the full tree without trimming')
     }
-    if(fullWindow){assert.equal(piOutputReserve(main),90000);assert.equal(session.model.maxTokens,128000)}
+    if(fullWindow){assert.equal(piOutputReserve(main),ratio50&&!nativeOutput?128000:90000);assert.equal(session.model.maxTokens,128000)}
     if(nativeOutput&&!fullWindow)assert.equal(piOutputReserve(main),18000)
   }
   assert.ok(swapEntry); assert.equal(swapEntry.details.backgroundPrepared, true); assert.equal(swapEntry.details.model, mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model)
@@ -241,7 +247,7 @@ try {
   assert.equal(mainCalls, slow ? 2 : 3); assert.ok(readFileSync(manager.getSessionFile(), 'utf8').startsWith(original))
   assert.ok(archive.eventRows(key).map(row => archive.exact(key, row.ordinal)).join('').startsWith(original))
   const receipt = { ok: true, directory: dir, installedPi: JSON.parse(readFileSync(join(packageRoot, 'package.json'))).version, backgroundAt: ratio50?'40%':'70%', replacedAt: ratio50?'50%':'80%', mainContinuedDuringPreparation: true,
-    mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal',contextWindow:window,configuredMaxTokens:maxTokens,effectiveMaxTokens:mainFork?piOutputReserve(mainPayloads[0]):undefined, uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
+    mode: mainFork?'native-main-fork':slow ? 'slow-summary-capacity-wait' : 'normal',contextWindow:window,configuredMaxTokens:maxTokens,effectiveMaxTokens:mainFork?piOutputReserve(mainPayloads[0]):undefined, uninterruptedMainTurns: mainCalls, summaryModel: mainFork?(otherModel?'scripted-summary':'scripted-main'):model.model, summaryModelCalls:apiCalls,expandedRecovery:mainFork&&branchPayloads.length>1, replacementSummaryHttpRequests: live || slow ? 'lookup-only path' : swapApiCalls - readyApiCalls,
     nativeBoundaryCommit: true, appendedUserAndToolResultsPreserved: true, fullOriginalPreserved: true,...(overGoal?{branchSummaryBudget}:{}),...(earlyNative?{earlyNativeCompactionRespected:true}:{}) }
   writeFileSync(join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); console.log(JSON.stringify(receipt))
   }

@@ -19,7 +19,7 @@ import { takeoverDefaults, takeoverLimits } from './compaction.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { closeSync, existsSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -73,6 +73,7 @@ export class ClaudeStore {
   constructor(dir = home()) {
     this.dir = resolve(dir)
     ensurePrivate(this.dir)
+    this.realDir = realpathSync(this.dir)
     privateFile(join(this.dir,'lcm.sqlite'))
     for(const suffix of ['-wal','-shm'])if(existsSync(join(this.dir,'lcm.sqlite'+suffix)))privateFile(join(this.dir,'lcm.sqlite'+suffix))
     this.db = new DatabaseSync(join(this.dir, 'lcm.sqlite'))
@@ -634,18 +635,49 @@ export class ClaudeStore {
       } finally { closeSync(source) }
     } finally { closeSync(archived) }
   }
-  ingest(session, path, kind = 'jsonl', {automatic = false} = {}) {
+  ingest(session, path, kind = 'jsonl', {automatic = false, origin = null, inTransaction = false} = {}) {
     // Serialize the cursor snapshot, archive copy and indexing across processes.
     // Commit completed records even if a later malformed/oversized row fails,
     // preserving the established incremental recovery and status behavior.
-    this.db.exec('BEGIN IMMEDIATE')
+    const owned=!inTransaction
+    if(owned)this.db.exec('BEGIN IMMEDIATE')
+    else if(!this.db.isTransaction)throw Error('Ingest requires an active transaction')
+    const wasDeleted=this.isDeleted(session)
     try {
-      if(automatic&&this.isDeleted(session))return {session,skipped:'deleted'}
-      return this.#ingestLocked(session,path,kind)
-    }
-    finally {
-      try { this.db.exec('COMMIT') }
-      catch(error){try{this.db.exec('ROLLBACK')}catch{};throw error}
+      if(automatic&&wasDeleted){if(owned)this.db.exec('COMMIT');return {session,skipped:'deleted'}}
+      const result=this.#ingestLocked(session,path,kind)
+      if(wasDeleted&&!result.added&&!result.offset)throw Error('Re-import has no complete records; the conversation remains deleted')
+      // The origin and source appear atomically, so deletion can always find
+      // the corresponding host rows even during the first DSH capture.
+      if(origin){
+        if(typeof origin.externalId!=='string'||!origin.externalId||origin.externalId.length>200)throw Error('Invalid source conversation ID')
+        this.setOrigin(session,origin.harness)
+        const previous=this.db.prepare('SELECT external_id FROM session_origins WHERE session=?').get(session)?.external_id
+        if(previous&&previous!==origin.externalId)throw Error('Source conversation ID changed; use a distinct session ID')
+        this.db.prepare('UPDATE session_origins SET external_id=COALESCE(external_id,?) WHERE session=?').run(origin.externalId,session)
+      }
+      if(owned)this.db.exec('COMMIT');return result
+    } catch(error) {
+      if(!owned)throw error
+      if(this.db.isTransaction){
+        try{this.db.exec(wasDeleted||origin?'ROLLBACK':'COMMIT')}
+        catch(commitError){try{this.db.exec('ROLLBACK')}catch{};throw commitError}
+      }
+      if(wasDeleted)try{
+        this.db.exec('BEGIN IMMEDIATE')
+        if(this.isDeleted(session)&&!this.source(session)){
+          const queue=this.db.prepare('INSERT OR IGNORE INTO deleted_session_files(session,path) VALUES(?,?)')
+          queue.run(session,this.archivePath(session))
+          if(origin?.harness==='dsh'){
+            let source;try{source=realpathSync(path)}catch{}
+            if(source&&inside(join(this.realDir,'dsh'),source))queue.run(session,source)
+            for(const table of ['dsh_mirrors','dsh_event_digests','dsh_activity','dsh_legacy_sources'])
+              if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))this.db.prepare(`DELETE FROM ${table} WHERE session=?`).run(session)
+          }
+        }
+        this.db.exec('COMMIT');this.cleanupDeletedFiles(session)
+      }catch{if(this.db.isTransaction)try{this.db.exec('ROLLBACK')}catch{}}
+      throw error
     }
   }
   #ingestLocked(session, path, kind) {
@@ -697,14 +729,23 @@ export class ClaudeStore {
     for(const row of sessions){
       this.db.exec('BEGIN IMMEDIATE')
       try{
-        // Import and cleanup serialize on this transaction. Never remove a
-        // file after an explicit import has revived the same conversation.
-        if(!this.isDeleted(row.session)||this.source(row.session))this.db.prepare('DELETE FROM deleted_session_files WHERE session=?').run(row.session)
-        else for(const {path} of this.db.prepare('SELECT path FROM deleted_session_files WHERE session=?').all(row.session)){
-          const rel=relative(this.dir,path)
-          if(!rel||rel.startsWith('..')||isAbsolute(rel))continue
-          if(!this.db.prepare('SELECT 1 FROM sources WHERE path=?').get(path)){
-            try{unlinkSync(path)}catch(error){if(error.code!=='ENOENT')continue}
+        // Import and cleanup serialize on this transaction. Protect the new
+        // source and archive individually, while still cleaning unrelated old files.
+        const current=this.source(row.session),archive=this.archivePath(row.session)
+        let currentArchive=null
+        if(current)try{currentArchive=join(realpathSync(dirname(archive)),basename(archive))}catch{}
+        for(const {path} of this.db.prepare('SELECT path FROM deleted_session_files WHERE session=?').all(row.session)){
+          let canonical
+          try{canonical=join(realpathSync(dirname(path)),basename(path))}
+          catch(error){if(error.code==='ENOENT'){this.db.prepare('DELETE FROM deleted_session_files WHERE session=? AND path=?').run(row.session,path)}continue}
+          if(canonical===this.realDir||!inside(this.realDir,canonical))continue
+          // Older databases can contain an alias with a symlinked ancestor.
+          // Treat it as a live reference before deleting the canonical path.
+          const referenced=this.db.prepare('SELECT path FROM sources').all().some(source=>{
+            try{return realpathSync(source.path)===canonical}catch{return resolve(source.path)===canonical}
+          })
+          if(canonical!==currentArchive&&!referenced){
+            try{unlinkSync(canonical)}catch(error){if(error.code!=='ENOENT')continue}
           }
           this.db.prepare('DELETE FROM deleted_session_files WHERE session=? AND path=?').run(row.session,path)
         }
@@ -716,14 +757,19 @@ export class ClaudeStore {
   // Remove one conversation from SuperLcm: records, summaries, settings and SuperLcm's own copies.
   // The host tool's transcript is never touched.
   deleteSession(session) {
-    const src = this.source(session)
-    if (!src) throw new Error('Unknown session')
-    const records = this.stats(session).records
-    const origin=this.db.prepare('SELECT harness,external_id FROM session_origins WHERE session=?').get(session)
-    const dshId=origin?.harness==='dsh'&&typeof origin.external_id==='string'?origin.external_id:null
-    const ownCopy = !relative(this.dir, src.path).startsWith('..') && !isAbsolute(relative(this.dir, src.path))
+    let src,records,dshId,ownCopy
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      src=this.source(session);if(!src)throw new Error('Unknown session')
+      records=this.stats(session).records
+      const origin=this.db.prepare('SELECT harness,external_id FROM session_origins WHERE session=?').get(session)
+      dshId=origin?.harness==='dsh'&&typeof origin.external_id==='string'?origin.external_id:null
+      // Older captures may have committed the mirror before recording origin.
+      if(!dshId&&(!origin||origin.harness==='dsh')&&this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='dsh_mirrors'").get()){
+        const mirror=this.db.prepare('SELECT header FROM dsh_mirrors WHERE session=?').get(session)
+        try{const id=JSON.parse(mirror?.header)?.id;if(typeof id==='string'&&/^[\w.-]{1,190}$/.test(id)&&session==='dsh-'+id)dshId=id}catch{}
+      }
+      ownCopy=src.path!==this.realDir&&inside(this.realDir,src.path)
       const deliveries = this.db.prepare('SELECT id FROM deliveries WHERE source_session=? OR target_session=?').all(session, session).map(x => x.id)
       for (const id of deliveries) { this.db.prepare('DELETE FROM delivery_packets WHERE id=?').run(id); this.db.prepare('DELETE FROM deliveries WHERE id=?').run(id) }
       const exists=table=>!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)

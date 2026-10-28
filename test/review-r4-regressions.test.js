@@ -163,7 +163,7 @@ test('unknown and nested non-text blocks cannot prove Claude coverage',async()=>
  assert.equal(rescue.use,false)
 })
 
-test('Claude main fork avoids repeatedly summarizing unseen or opaque source',t=>{
+test('Claude main fork stops at opaque source and plans verified recovery after compaction',t=>{
  const rows=[{type:'user',message:{content:'first request'}},{type:'assistant',message:{content:'first answer'}},
   {type:'user',message:{content:[{type:'text',text:'inspect'},{type:'input_file',file_id:'fixture'}]}},
   {type:'assistant',message:{content:'second answer'}},{type:'user',message:{content:'continue'}}]
@@ -175,7 +175,7 @@ test('Claude main fork avoids repeatedly summarizing unseen or opaque source',t=
  assert.equal(planMainFork(s,h.id,{keepTokens:0,force:true,env:{}}),null)
  const h2=fixture({rows:rows.map((r,i)=>i===2?{type:'user',message:{content:'ordinary'}}:r)}),s2=h2.open();t.after(()=>s2.close())
  s2.markCompaction(h2.id,3)
- assert.equal(planMainFork(s2,h2.id,{keepTokens:0,force:true,env:{}}),null)
+ assert.ok(planMainFork(s2,h2.id,{keepTokens:0,force:true,env:{}}))
 })
 
 test('model deletion rolls back model and binding together when unbinding fails',t=>{

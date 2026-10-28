@@ -131,6 +131,26 @@ test('integrated DSH archives a complete native fork tree with takeover off',asy
  }finally{await forks?.close();store.close();await close(h)}
 })
 
+test('reimported DSH conversations mirror an identical regenerated tree',async()=>{
+ const h=await lab({capacity:64000,config:{auto:false,summaryMode:'main-fork'}}),store=new ClaudeStore(h.dir);let forks,branches=0
+ try{
+  store.setGlobalSetting('main-fork');forks=new MainArchiveFork(h.ctx,h.engine.superLcmStore,h.dir,error=>h.warnings.push(error.message));history(h,.72)
+  const original=h.ctx.llm.stream.bind(h.ctx.llm)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches++;const prompt=options.messages.at(-1).content.map(b=>b.text||'').join(''),plan=JSON.parse(prompt.split('\n').find(x=>x.startsWith('[{"index":')))
+   yield {type:'text-delta',text:JSON.stringify({blocks:plan.map(n=>({index:n.index,summary:'# Historical state\nKeep the original constraints; inspection remains pending.'}))})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  await send(h,'Synthetic request: preserve the constraints.')
+  const packet={header:h.agent.session.header,records:h.agent.session.snapshotEvents().map(e=>projectDshEvent(h.id,e,JSON.stringify(e.data)))},id=dshSessionKey(h.id)
+  captureDshPacket(store,packet);forks.afterCapture(h.id,true);await Promise.all([...forks.jobs.values()].map(j=>j.promise))
+  const first=forks.db.nodes(h.id).length;assert.ok(first>0);assert.ok(store.summaries(id).total>0)
+  store.deleteSession(id);captureDshPacket(store,packet,{clientKind:'import'});forks.afterCapture(h.id,true)
+  await Promise.all([...forks.jobs.values()].map(j=>j.promise))
+  assert.equal(branches,2);assert.equal(forks.db.nodes(h.id).length,first);assert.equal(store.summaries(id).total,first,h.warnings.join('\n'))
+ }finally{await forks?.close();store.close();await close(h)}
+})
+
 test('DSH passive branch honors the native model override and 40% preparation with takeover off',async()=>{
  const {writeFileSync}=await import('node:fs'),{join}=await import('node:path')
  const h=await lab({capacity:64000,config:{auto:false,summaryMode:'main-fork'}}),store=new ClaudeStore(h.dir);let forks
