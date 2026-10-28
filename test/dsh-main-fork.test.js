@@ -34,10 +34,9 @@ for(const stalled of [false,true])test('native fork '+(stalled?'still stops at i
   assert.equal(h.engine.backgroundFolds.get(h.agent)?.status,'summarizing')
   if(stalled){
    t.mock.timers.tick(deadline)
-   await h.engine.settleBackgroundFold(h.agent)
+   await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
    assert.equal(branchSignal.aborted,true)
-   assert.equal(h.engine.backgroundFolds.get(h.agent),undefined)
-   assert.ok(h.warnings.some(s=>s.includes('timed out')))
+   assert.ok(h.warnings.some(s=>s.includes('timeout')))
    assert.equal(count(h,'compaction/summary'),0)
   }else{
    release();await h.engine.settleBackgroundFold(h.agent)
@@ -73,9 +72,14 @@ for(const failure of [false,true])test('real DSH main branch: '+(failure?'summar
   const initial=send(h,'MAIN INPUT MUST REMAIN VERBATIM')
   await until(()=>branches.length===1)
   if(!failure){await until(()=>h.main.length===1);assert.equal(count(h,'compaction/summary'),0);release()}
+  else{
+   await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
+   assert.equal(h.main.length,0);assert.equal(count(h,'compaction/summary'),0)
+   h.agent.cancel({kind:'user'},{keepInbox:true})
+  }
   await initial
   await h.engine.settleBackgroundFold(h.agent)
-  if(failure){assert.equal(h.main.length,0);assert.ok(h.errors.length);assert.equal(count(h,'compaction/summary'),0);return}
+  if(failure){assert.equal(h.main.length,0);assert.equal(count(h,'compaction/summary'),0);return}
   assert.equal(branches.length,1)
   const mainRequest=h.engine.mainRequests.get(h.agent).request
   assert.deepEqual(branches[0].messages.slice(0,-1),mainRequest.messages)
@@ -111,8 +115,14 @@ for (const fault of ['truncated','tool-call','cancelled']) test('DSH branch refu
     for(const controller of h.engine.backgroundControllers)controller.abort(Error('synthetic cancellation'))
     yield {type:'finish',reason:{kind:'stop'}}
   })()
-  await send(h,'CURRENT INPUT KEPT EXACTLY')
-  assert.equal(h.main.length,0);assert.ok(h.errors.length)
+  const pending=send(h,'CURRENT INPUT KEPT EXACTLY')
+  if(fault!=='cancelled'){
+   await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
+   assert.equal(h.main.length,0)
+   h.agent.cancel({kind:'user'},{keepInbox:true})
+  }
+  await pending
+  assert.equal(h.main.length,0)
   assert.equal(count(h,'compaction/summary'),0)
   assert.ok(h.agent.session.snapshotEvents().some(event=>JSON.stringify(event).includes('CURRENT INPUT KEPT EXACTLY')))
  } finally {await close(h)}
@@ -173,11 +183,12 @@ test('DSH rejects an auxiliary model that cannot hold the complete branch and pr
   let branches=0;const original=h.ctx.llm.stream.bind(h.ctx.llm)
   h.ctx.llm.stream=options=>{if(forkScope.getStore())branches++;return original(options)}
   history(h,.42);const originals=h.agent.session.surface.nodes.slice()
-  await send(h,'KEEP_INPUT_WHEN_SUMMARY_MODEL_IS_TOO_SMALL');await h.engine.settleBackgroundFold(h.agent)
+  await send(h,'KEEP_INPUT_WHEN_SUMMARY_MODEL_IS_TOO_SMALL')
+  await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
   assert.equal(branches,0);assert.equal(count(h,'compaction/summary'),0)
   assert.ok(originals.every(seq=>h.agent.session.surface.nodes.includes(seq)))
   assert.equal(h.agent.options.model,'main-64000')
-  assert.ok(h.warnings.some(message=>message.includes('输入空间')))
+  assert.equal(h.engine.backgroundFolds.get(h.agent).errorKind,'capacity')
  }finally{await close(h)}
 })
 

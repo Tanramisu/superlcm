@@ -25,8 +25,12 @@ export function captureMainRequest(engine, agent, options) {
   const {signal, ...request} = options
   engine.mainRequests.set(agent, {request: structuredClone(request), generation: engine.runtimeGeneration})
 }
-export async function summarizeMainFork(engine, agent, prepared, signal) {
-  const capture = engine.mainRequests?.get(agent), policy = currentPolicy(engine, agent)
+export async function summarizeMainFork(engine, agent, prepared, signal, capture=engine.mainRequests?.get(agent), retry={}) {
+  const policy=currentPolicy(engine,agent)
+  if(!policy)throw Error('后台摘要的压缩策略已变化')
+  return summaryAttempt(attempt=>runMainFork(engine,agent,prepared,attempt,capture,policy,retry),signal,policy.summaryTimeoutMs)
+}
+async function runMainFork(engine,agent,prepared,signal,capture,policy,retry) {
   if (!capture || capture.generation !== engine.runtimeGeneration) throw Error('DSH 尚未捕获当前模型的原始请求')
   if (!Number.isFinite(policy?.inputBudget)) throw Error('主模型分支需要按模型容量管理压缩')
   const indexed = reindexSession(engine.superLcmStore,agent.session)
@@ -54,9 +58,11 @@ export async function summarizeMainFork(engine, agent, prepared, signal) {
   const plan = parts.map(part=>part.range), target = Math.max(256,Math.min(Math.floor(policy.summaryPrefixTargetTokens*.7),Math.floor((request.maxTokens||16384)*.65)))
   const treeOptions={fanout:policy.condensedMinFanout||4,targetTokens:target}
   const language=dshSummaryLanguage(agent.session)
-  const directive = forkDirective(plan,target,language.name,treeOptions)
+  const correction=['invalid_json','invalid_summary'].includes(retry.previousFailure)
+    ? '\nThe previous attempt failed output validation. Return only the required JSON object, include every planned leaf and parent exactly once in index order, start each summary with a heading in the requested language, and respect the single shared output budget. Do not call tools or continue the task.' : ''
+  const directive = forkDirective(plan,target,language.name,treeOptions)+correction
   const directiveTokens = engine.ctx.tokenMeter.estimateMessage(createUserMessage({content:[{type:'text',text:directive}]}))
-  if (prepared.activeTokens + directiveTokens >= Math.min(policy.inputBudget,route.inputBudget??Infinity) - 1024) throw Error('DSH 后台分支没有足够输入空间，原文保留')
+  if (prepared.activeTokens + directiveTokens >= Math.min(policy.inputBudget,route.inputBudget??Infinity) - 1024) throw Object.assign(Error('DSH 后台分支没有足够输入空间，原文保留'),{code:'SUPERLCM_FORK_CAPACITY'})
   const options = {...request,messages:[...request.messages,createUserMessage({content:[{type:'text',text:directive}]})]}
   const archiveSnapshot=forkArchiveSnapshot(engine.superLcmStore.path)
   const raw = [], usage = {}; let text = ''

@@ -5,6 +5,7 @@ const routeFailureCodes = new Map([
   ['ACCOUNT_QUOTA','QUOTA'],['ACCOUNT_SIGN_IN_REQUIRED','AUTH'],['ACCOUNT_TOKEN_INVALID','AUTH'],
   ['MISSING_CREDENTIAL','AUTH'],['INVALID_CREDENTIAL','AUTH'],
 ])
+export const summaryFailureCode = code => routeFailureCodes.get(code)
 
 export function summarySessionId(sessionId, route) {
   return 'superlcm-summary-' + createHash('sha256')
@@ -28,7 +29,7 @@ export async function* completeSummaryStream(stream, signal) {
     if (chunk.type === 'finish') {
       if (chunk.reason?.kind !== 'stop') {
         const raw = chunk.reason?.failure?.code ?? chunk.reason?.code
-        const code = routeFailureCodes.get(raw)
+        const code = summaryFailureCode(raw)
         throw Object.assign(new Error('Summary generation was incomplete; original content retained'),code ? {code} : {})
       }
       finished = true

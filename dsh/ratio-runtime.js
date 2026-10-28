@@ -79,17 +79,19 @@ export async function pressureStep(engine, agent, signal) {
   if (policy.budgetMode !== 'ratio' || activeInputTokens(engine,agent) < policy.hardActiveTokens) return
   // Wait for progress, not the whole frozen multi-batch job. At each completed
   // batch a verified prefix may already release safe headroom. One total
-  // deadline covers all batches; later batches do not reset it.
+  // deadline covers legacy batches. Native forks retry independently and keep
+  // this admitted request paused until success or explicit cancellation.
   const deadline = new AbortController()
-  const waiting = AbortSignal.any([signal, deadline.signal])
-  const timer = setTimeout(() => deadline.abort(Error('后台摘要尚未就绪，请稍后重试。当前请求已保留。')), policy.summaryTimeoutMs)
+  const retryingFork=engine.rollingConfig.summaryMode==='main-fork'
+  const waiting = retryingFork ? signal : AbortSignal.any([signal, deadline.signal])
+  const timer = retryingFork ? null : setTimeout(() => deadline.abort(Error('后台摘要尚未就绪，请稍后重试。当前请求已保留。')), policy.summaryTimeoutMs)
   try {
     for (;;) {
       waiting.throwIfAborted()
       engine.tryCommitBackgroundFold(agent, {allowPressure:true})
       if (activeInputTokens(engine,agent) < policy.hardActiveTokens) break
       const pending = engine.backgroundFolds.get(agent)
-      if (!['summarizing','cancelling'].includes(pending?.status) || !pending.promise) break
+      if (!['summarizing','retrying','cancelling'].includes(pending?.status) || !pending.promise) break
       await abortable(pending.promise, waiting)
     }
   } finally { clearTimeout(timer) }

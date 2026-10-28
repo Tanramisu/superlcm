@@ -1,4 +1,5 @@
 import { summarizeMainFork } from './main-fork.js'
+import {retryFork} from './fork-retry.js'
 import {SUMMARY_POLICY_VERSION} from '../src/summary-policy.js'
 import { randomUUID } from 'node:crypto'
 import { nativePreStep, registerRequestBoundary } from './request-boundary.js'
@@ -196,8 +197,8 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     return prepareAsyncRegion(this, agent, selection)
   }
 
-  summarizeBackgroundSelection(agent, prepared, signal) {
-    return this.rollingConfig.summaryMode === 'main-fork' ? summarizeMainFork(this,agent,prepared,signal) : summarizeAsyncRegion(this, agent, prepared, signal)
+  summarizeBackgroundSelection(agent, prepared, signal, capture, attempt) {
+    return this.rollingConfig.summaryMode === 'main-fork' ? summarizeMainFork(this,agent,prepared,signal,capture,attempt) : summarizeAsyncRegion(this, agent, prepared, signal)
   }
 
   commitBackgroundSelection(agent, summarized) {
@@ -247,7 +248,10 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
     this.backgroundControllers.add(controller)
     this.compressionReporter.report(agent.session.id, 'summarizing', { ...selection, start: parts[0]?.start ?? selection.start })
     if (!selection.treeOnly && policy.summaryLeafTargetTokens) prepared.summaryTargetTokens = policy.summaryLeafTargetTokens
-    state.promise = abortable(selection.treeOnly ? Promise.resolve(null) : this.summarizeBackgroundSelection(agent, prepared, controller.signal),controller.signal)
+    const capture=this.mainRequests?.get(agent)
+    const run=attempt=>this.summarizeBackgroundSelection(agent,prepared,controller.signal,capture,attempt)
+    state.promise = abortable(selection.treeOnly ? Promise.resolve(null) : this.rollingConfig.summaryMode==='main-fork'
+      ? retryFork(this,agent,state,policy,run) : run(),controller.signal)
       .then(async (summarized) => {
         controller.signal.throwIfAborted()
         if (this.backgroundFolds.get(agent) !== state || currentPolicy(this, agent)?.signature !== state.signature) return
@@ -276,7 +280,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
           if (recovered?.status === 'ready' && recovered.summarized && recovered.generation === this.runtimeGeneration && currentPolicy(this,agent)?.signature === recovered.signature) this.backgroundFolds.set(agent, recovered)
           else this.backgroundFolds.delete(agent)
         }
-        this.summaryGuards.failedSession(agent, fingerprint, policy.summaryRetryCooldownMs)
+        if(!controller.signal.aborted)this.summaryGuards.failedSession(agent, fingerprint, policy.summaryRetryCooldownMs)
         const message = error instanceof Error ? error.message : String(error)
         this.ctx.logger?.warn?.(`rolling compaction background summary failed: ${message}; continuing`)
       })
@@ -357,7 +361,7 @@ export class SuperLcmCompactionEngine extends BasicCompactionEngine {
   }
   async settleBackgroundFold(agent) {
     let state
-    while (['summarizing', 'cancelling'].includes((state = this.backgroundFolds.get(agent))?.status)) await state.promise
+    while (['summarizing', 'retrying', 'cancelling'].includes((state = this.backgroundFolds.get(agent))?.status)) await state.promise
   }
   logFoldResult(ctx, result) {
     if (result !== null && typeof result === 'object' && Array.isArray(result.shadowedSeqs)) {
