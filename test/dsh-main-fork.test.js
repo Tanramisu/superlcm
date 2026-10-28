@@ -1,11 +1,68 @@
 // Real DSH admission/rebuild/compaction; the model adapter is wholly local.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import {Context} from '@deepseek-ai/cordis'
+import {SessionStore} from '@deepseek-ai/dsh-session'
+import {assertReleasedV4Relationships} from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import {lab,history,send,close,count,checkpoint,until} from './reliability/lab.mjs'
 import {forkScope} from '../dsh/main-fork.js'
 import {ROLLING_DEFAULTS} from '../dsh/engine-config.js'
 import {controlsConfig} from '../dsh/controls-config.js'
 import {currentPolicy,activeInputTokens} from '../dsh/ratio-runtime.js'
+import {estimateSummaryTokens} from '../src/summary-tokens.js'
+
+test('an idle host closes without corrupting the native persisted event relationships',async()=>{
+ const h=await lab({capacity:500000,maxTokens:128000,config:{summaryMode:'main-fork'}})
+ let closed=false
+ try{
+  assert.deepEqual(await send(h,'Continue the current task.'),[])
+  const session=h.agent.session
+  assert.equal(session.requestHeader().config.maxTokens,98976)
+  await close(h);closed=true
+  const events=session.snapshotEvents()
+  assertReleasedV4Relationships({header:session.header,events,inheritedEventCount:0},new Set(events.map(e=>e.type)))
+ }finally{if(!closed)await close(h)}
+})
+
+for(const fits of [true,false])test('native summary tree '+(fits?'may exceed its planning goal within the hard limit':'must not exceed the independent hard limit'),async()=>{
+ const h=await lab({capacity:64000,config:{summaryMode:'main-fork',summaryTimeoutMs:300,summaryRetryCooldownMs:1000}})
+ let branches=0,budget
+ try{
+  history(h,fits?.72:.91)
+  const original=h.ctx.llm.stream.bind(h.ctx.llm)
+  h.ctx.llm.stream=options=>!forkScope.getStore()?original(options):(async function*(){
+   branches++
+   const prompt=options.messages.at(-1).content.map(b=>b.text||'').join('')
+   const plan=JSON.parse(prompt.split('\n').find(s=>s.startsWith('[{"index":')))
+   const target=Number(prompt.match(/together must fit (\d+) tokens/)[1])
+   const hard=Math.min(currentPolicy(h.engine,h.agent).summaryPrefixTargetTokens,options.maxTokens)
+   const blocks=plan.map(p=>({index:p.index,summary:'# Historical state\nPreserve constraints and pending work.'}))
+   const total=()=>blocks.reduce((n,b)=>n+estimateSummaryTokens(b.summary),0)
+   const wanted=fits?Math.ceil(target*1.07):hard+32
+   blocks[0].summary+=' '+'x'.repeat(Math.max(0,wanted-total())*4)
+   budget={target,hard,total:total()};assert.ok(budget.total>target)
+   assert.equal(budget.total<=hard,fits)
+   yield {type:'text-delta',index:0,text:JSON.stringify({blocks})}
+   yield {type:'finish',reason:{kind:'stop'}}
+  })()
+  const input='KEEP ORIGINAL REQUEST DURING SUMMARY VALIDATION'
+  const pending=send(h,input)
+  if(!fits){
+   await until(()=>h.engine.backgroundFolds.get(h.agent)?.status==='retrying')
+   assert.equal(h.main.length,0);h.agent.cancel({kind:'user'},{keepInbox:true})
+  }
+  await pending
+  if(fits){
+   await until(()=>['ready','retrying'].includes(h.engine.backgroundFolds.get(h.agent)?.status))
+   assert.equal(h.engine.backgroundFolds.get(h.agent)?.status,'ready',h.warnings.join('\n'))
+   await h.engine.settleBackgroundFold(h.agent)
+   await send(h,'CONTINUE WITH THE SAME SUMMARY '+'t'.repeat(28000))
+   assert.equal(count(h,'compaction/summary'),1)
+  }else assert.equal(count(h,'compaction/summary'),0)
+  assert.equal(branches,1)
+  assert.ok(h.agent.session.snapshotEvents().some(e=>JSON.stringify(e).includes(input)))
+ }finally{await close(h)}
+})
 
 test('a later adapter override cannot send an oversized foreground request',async()=>{
  const h=await lab({capacity:500000,maxTokens:128000,config:{summaryMode:'main-fork'}})
@@ -73,7 +130,13 @@ test('500K window prepares at 350K and replaces at 400K with a configured 128K o
   assert.ok(h.main.every(r=>r.inputTokens+r.maxTokens<500000))
   const session=h.agent.session
   await close(h);closed=true
-  assert.equal(session.requestHeader().config.maxTokens,128000,'shutdown restores configured ceiling')
+  const fresh=new Context()
+  try{
+   new SessionStore(fresh)
+   const resumed=fresh.sessions.create(session.id,{meta:session.header,seed:session.snapshotEvents(),eventState:'detached'})
+   assert.deepEqual(resumed.requestHeader(),session.requestHeader(),'closing an idle host must leave a cold-readable log')
+   assert.equal(resumed.requestHeader().config.maxTokens,98976,'shutdown must not append an out-of-turn header')
+  }finally{await fresh.fiber.dispose()}
  }finally{if(!closed)await close(h)}
 })
 

@@ -29,16 +29,11 @@ for(const explicit of [true,false])test('total-window output protection restores
   assert.equal(state.requested,explicit?128000:65536)
   const again=await ctx.waterfall('agent/request',{agent,signal},async()=>config)
   assert.equal(again.maxTokens,51405,'repeated steps retain the configured ceiling receipt')
+  const before=session.snapshotEvents()
   publish('native-after-output');await owner.reload()
-  const header=session.requestHeader()
-  assert.equal(header.config.maxTokens,explicit?128000:65536)
-  assert.equal(header.adapterDefaults?.maxTokens===true,!explicit)
-  const fresh=new Context()
-  try{
-   new SessionStore(fresh)
-   const resumed=fresh.sessions.create(session.id,{meta:session.header,seed:session.snapshotEvents(),eventState:'detached'})
-   assert.deepEqual(resumed.requestHeader(),header,'restored request headers remain valid on cold resume')
-  }finally{await fresh.fiber.dispose()}
+  assert.deepEqual(session.snapshotEvents(),before,'unmounting must not inject request headers into the log')
+  const restored=await ctx.waterfall('agent/request',{agent,signal},async()=>config)
+  assert.deepEqual(restored,proposed,'the next native request restores explicit or adapter-default output configuration')
  })
 })
 

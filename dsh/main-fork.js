@@ -79,7 +79,10 @@ async function runMainFork(engine,agent,prepared,signal,capture,policy,retry) {
     }
   }),leasedSignal,policy.summaryTimeoutMs))
   signal?.throwIfAborted()
-  const blocks = parseForkTree(text,plan,language,treeOptions),built=[]
+  // The prompt target is a planning goal, not an exact tokenizer result.
+  // Keep a separate hard tree limit and still check the installed root below.
+  const hardTreeBudget=Math.min(policy.summaryPrefixTargetTokens,maxTokens)
+  const blocks = parseForkTree(text,plan,language,{...treeOptions,targetTokens:hardTreeBudget}),built=[]
   for(const block of blocks){
     const children=block.children.map(i=>built[i])
     const part=block.level===0?parts[block.index]:assembleRegions(engine,children)

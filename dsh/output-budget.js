@@ -18,7 +18,7 @@ export function createOutputBudgetState(db) {
   }
 }
 export function registerOutputBudget(engine,store,{restoreOnly=false,context=engine.ctx}={}) {
-  const state=store.outputBudgetState(),ctx=context,life=new AbortController(),agents=new Map(),refs=new WeakMap()
+  const state=store.outputBudgetState(),ctx=context,life=new AbortController()
   const read=state.read
   const own=(row,config)=>row?.active===1&&row.provider===config.provider&&row.model===config.model&&row.effective===config.maxTokens
   const original=(config,row)=>{
@@ -45,29 +45,14 @@ export function registerOutputBudget(engine,store,{restoreOnly=false,context=eng
     // host durably retains the current input before showing the error.
     if(!Number.isSafeInteger(window)||!Number.isSafeInteger(requested)||requested<1||window-requested<1024)return config
     const effective=outputBudget(window,engine.rollingConfig.switchRatio,requested)
-    if(effective===requested){agents.delete(refs.get(agent));return config}
+    if(effective===requested)return config
     const value={session:session.id,provider:config.provider,model:config.model,requested,explicit:+(config.maxTokens!==undefined),effective,option_max:option,active:1}
     if(!row||Object.keys(value).some(k=>row[k]!==value[k]))state.save(value)
-    if(!refs.has(agent))refs.set(agent,new WeakRef(agent))
-    agents.set(refs.get(agent),value)
     return {...config,maxTokens:effective}
   })
   ctx.effect(()=>()=>{
     life.abort(Error('输出容量保护已关闭'))
-    for(const [ref,row] of agents){
-      const agent=ref.deref();if(!agent)continue
-      try{
-        const session=agent.session,header=session.requestHeader()
-        if(!header||!own(row,header.config))continue
-        const config={...header.config,maxTokens:row.requested}
-        const restored={...header,config},defaults={...header.adapterDefaults}
-        if(row.explicit)delete defaults.maxTokens
-        else defaults.maxTokens=true
-        if(Object.keys(defaults).length)restored.adapterDefaults=defaults
-        else delete restored.adapterDefaults
-        session.append('request/header',{header:restored,reason:'change'})
-      }catch{ctx.logger?.warn?.('输出额度恢复待下次请求处理')}
-    }
-    agents.clear()
+    // Restoring belongs to the next native request, inside its open turn.
+    // Teardown may already be after turn/end and must never append headers.
   })
 }
