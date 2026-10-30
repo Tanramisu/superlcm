@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { markerFromSummary, contentBlocksToText, stripRecallMetadata } from './marker.js'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { semanticFrontier, isTransparentAssembly } from './tree-semantics.js'
+import { checkpointMatches } from './legacy-checkpoints.js'
 
 // A model's markers are never authority. Only engine-produced, committed tree
 // metadata whose leaves match the verified surface range can enter the index.
@@ -18,13 +19,24 @@ export function preparedTreeNodes(session, event, root, store, aliases = new Map
     const source = session.eventAt ? session.eventAt(seq) : eventMap.get(seq)
     if (source?.type !== 'user/message' || !source.data?.source || !isCompactCheckpointSource(source.data.source)) continue
     const marker = markerFromSummary(source.data.content)
-    if (marker) {
-      checkpoints.set(marker.id, [seq]); physicalCheckpoints.set(marker.id, [seq])
-      const members = store?.getNode(root.sessionId, marker.id)
-        ? semanticFrontier(store, root.sessionId, marker.id) : [marker.id]
+    // Native DSH checkpoint summaries have no SuperLcm marker. Recognize them
+    // only through an already-verified archive node with matching compaction
+    // identity and exact checkpoint content; never trust a model-supplied id.
+    const nativeNode = marker === null
+      ? store?.getCompactionNode(root.sessionId, source.data.source.compactionId)
+      : null
+    const nativeId = nativeNode?.status === 'ready'
+      && nativeNode.compactionId === source.data.source.compactionId
+      && checkpointMatches(nativeNode.summary, source.data.content)
+      ? nativeNode.nodeId : null
+    const checkpointId = marker?.id ?? nativeId
+    if (checkpointId !== null) {
+      checkpoints.set(checkpointId, [seq]); physicalCheckpoints.set(checkpointId, [seq])
+      const members = store?.getNode(root.sessionId, checkpointId)
+        ? semanticFrontier(store, root.sessionId, checkpointId) : [checkpointId]
       const keys = members.map(id => `${seq}:${id}`)
       for (const key of keys) required.add(key)
-      witnesses.set(marker.id, keys)
+      witnesses.set(checkpointId, keys)
       for (const [index, id] of members.entries()) {
         checkpoints.set(id, [seq]); witnesses.set(id, [keys[index]])
       }
