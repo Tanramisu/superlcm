@@ -7,7 +7,7 @@ const {isCompactCheckpointSource}=await import('@deepseek-ai/dsh-compaction').ca
 import { contentBlocksToText, extractMarkers, markerFromSummary, stripRecallMetadata } from './marker.js'
 import { preparedTreeNodes } from './prepared-tree.js'
 import { semanticLevel } from './tree-semantics.js'
-import { checkpointMatches, summaryIdentity, legacyIdentities } from './legacy-checkpoints.js'
+import { checkpointMatches, summaryIdentity, legacyIdentities, legacyNativeIdentity } from './legacy-checkpoints.js'
 import { isDeepStrictEqual } from 'node:util'
 const historicalRepair = new WeakMap()
 
@@ -165,9 +165,33 @@ export function committedCompactionSummary(session, endEvent) {
   return record?.summary ?? null
 }
 
+// An inherited prepared tree names native checkpoints with the identity the
+// producing session derived. Releases before nativeIdentity also hashed that
+// session's id, so a fork can receive an id it cannot re-derive: the ids of its
+// own session and of its fork parent are accepted as aliases of the identity
+// this session assigns to the same record, never as identities of their own.
+// Post-fix identities depend only on the record, so a fork derives them as is.
+function nativeIdentityAliases(session, records, identities) {
+  const aliases = new Map()
+  const sessionId = sessionIdOf(session)
+  const parentSession = session?.header?.parentSession
+  const producers = typeof parentSession === 'string' && parentSession.length > 0
+    ? [sessionId, parentSession]
+    : [sessionId]
+  for (const record of records) {
+    if (markerFromSummary(record.summary.data?.summary) !== null) continue
+    const canonical = summaryIdentity(record.summary, identities)
+    for (const producer of producers) {
+      const legacy = legacyNativeIdentity(producer, record.summary)
+      if (legacy !== canonical) aliases.set(legacy, canonical)
+    }
+  }
+  return aliases
+}
+
 function trustedCheckpointNodeIds(sessionId, events, records, sourceSeqs, identities) {
   const eventsBySeq = eventMapOf(events)
-  const committed = new Map(records.map(record => [record.checkpoint.seq, summaryIdentity(sessionId, record.summary, identities)]))
+  const committed = new Map(records.map(record => [record.checkpoint.seq, summaryIdentity(record.summary, identities)]))
   return [...new Set(sourceSeqs.flatMap((seq) => {
     const source = eventsBySeq.get(seq)
     if (source?.type !== 'user/message' || !source.data?.source || !isCompactCheckpointSource(source.data.source)) return []
@@ -187,7 +211,7 @@ export function nodeFromCompactionEvent(session, event, context) {
     : []
   return {
     sessionId,
-    nodeId: summaryIdentity(sessionId, event, context?.identities),
+    nodeId: summaryIdentity(event, context?.identities),
     compactionId: String(event.data?.compactionId ?? ''),
     summarySeq: event.seq,
     createdAt: Number.isFinite(event.time) ? event.time : Date.now(),
@@ -208,11 +232,12 @@ export function nodeFromCompactionEvent(session, event, context) {
 function writeCompactionTree(store, session, event, context, repairOnly = false) {
   if (!context) {
     const events = sessionEvents(session), records = committedCompactionRecords(events)
-    context = { events, records, identities: legacyIdentities(store, sessionIdOf(session), records) }
+    const identities = legacyIdentities(store, sessionIdOf(session), records)
+    context = { events, records, identities, aliases: nativeIdentityAliases(session, records, identities) }
   }
   const node = nodeFromCompactionEvent(session, event, context)
   if (node === null) return null
-  const tree = preparedTreeNodes(session, event, node, store)
+  const tree = preparedTreeNodes(session, event, node, store, context.aliases)
   let changed = 0
   for (const item of tree) {
     const existing = repairOnly ? store.getNode(item.sessionId, item.nodeId) : null
@@ -244,6 +269,7 @@ export function reindexSession(store, session, { rebuild = false } = {}) {
     ? records.filter(record => repairHistory || record.end.seq > afterSeq)
     : []
   const identities = legacyIdentities(store, sessionId, records)
+  const aliases = nativeIdentityAliases(session, records, identities)
   let markers = 0
   let indexed = 0
   let failedEndSeq = null
@@ -251,7 +277,7 @@ export function reindexSession(store, session, { rebuild = false } = {}) {
   for (const { summary: event, end } of committed) {
     markers += 1
     try {
-      const result = writeCompactionTree(store, session, event, { events, records, identities }, end.seq <= afterSeq)
+      const result = writeCompactionTree(store, session, event, { events, records, identities, aliases }, end.seq <= afterSeq)
       if (result?.changed) indexed += 1
     } catch (error) {
       failedEndSeq = end.seq
@@ -461,13 +487,14 @@ export function doctorSession(store, session) {
   const records = committedCompactionRecords(events)
   const unfinishedStarts = unfinishedCompactionStarts(events).map(event=>event.seq)
   const identities = legacyIdentities(store, sessionId, records)
+  const aliases = nativeIdentityAliases(session, records, identities)
   for (const { summary: event } of records) {
-    const id = summaryIdentity(sessionId, event, identities)
+    const id = summaryIdentity(event, identities)
     markers.push({ seq: event.seq, id })
     if (markerIds.has(id)) duplicates.push(id)
     try {
       const root = nodeFromCompactionEvent(session, event, { events, records, identities })
-      for (const node of preparedTreeNodes(session, event, root, store)) {
+      for (const node of preparedTreeNodes(session, event, root, store, aliases)) {
         if (markerIds.has(node.nodeId) && node.nodeId !== id) duplicates.push(node.nodeId)
         markerIds.add(node.nodeId)
       }

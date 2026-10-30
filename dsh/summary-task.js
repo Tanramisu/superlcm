@@ -12,7 +12,10 @@ export function checkpointChild(engine, session, event) {
   let node=lookup()
   if (!node) {
     const rebuilt=reindexSession(engine.superLcmStore,session)
-    if (rebuilt.errors.length) throw new Error('Cannot verify source checkpoint ancestry')
+    // The reindex names the record it refused; keeping that detail here is what
+    // separates a lineage mismatch from a corrupted or forged checkpoint.
+    if (rebuilt.errors.length) throw new Error('Cannot verify source checkpoint ancestry: '
+      + rebuilt.errors.map(error => `seq ${error.seq}: ${error.error}`).join('; '))
     node=lookup()
   }
   if (!node || node.compactionId !== compactionId || marker && marker.id !== node.nodeId || !checkpointMatches(node.summary,event.data.content)) throw new Error('Source checkpoint has no verified archive node')

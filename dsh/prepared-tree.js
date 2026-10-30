@@ -5,7 +5,7 @@ import { semanticFrontier, isTransparentAssembly } from './tree-semantics.js'
 
 // A model's markers are never authority. Only engine-produced, committed tree
 // metadata whose leaves match the verified surface range can enter the index.
-export function preparedTreeNodes(session, event, root, store) {
+export function preparedTreeNodes(session, event, root, store, aliases = new Map()) {
   const data = event.data
   if (!Array.isArray(data.preparedTree)) return [root]
   const declared = [...data.preparedTree, { ...root, kind: data.summaryTreeKind,
@@ -37,7 +37,12 @@ export function preparedTreeNodes(session, event, root, store) {
       || !Array.isArray(item.childIds) || !isDeepStrictEqual(marker.children, item.childIds)
       || new Set(item.sourceSeqs).size !== item.sourceSeqs.length
       || !item.sourceSeqs.every(seq => rootSources.has(seq))) throw Error('invalid prepared summary tree')
-    nodes.set(item.nodeId, { ...root, ...item, sessionId: root.sessionId, summarySeq: root.summarySeq,
+    // The declared tree was produced by one session and may arrive through a
+    // fork that assigns a different id to the same inherited checkpoint. Only
+    // ids proven to be another form of one record are rewritten; anything else
+    // keeps its declared value and fails the physical-checkpoint comparison.
+    const childIds = item.childIds.map(id => aliases.get(id) ?? id)
+    nodes.set(item.nodeId, { ...root, ...item, childIds, sessionId: root.sessionId, summarySeq: root.summarySeq,
       createdAt: root.createdAt, compactionId: root.compactionId, status: 'ready',
       summaryText: stripRecallMetadata(contentBlocksToText(item.summary)) })
   }
